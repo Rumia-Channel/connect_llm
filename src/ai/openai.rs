@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use super::{
-    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, StreamChunk, ThinkingConfig,
-    ThinkingOutput, Usage,
+    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
+    ThinkingConfig, ThinkingOutput, Usage, capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -77,6 +77,8 @@ struct OpenAiMessageResponse {
     content: String,
     #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +109,8 @@ struct OpenAiDelta {
     content: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     role: Option<String>,
@@ -313,11 +317,21 @@ impl OpenAiClient {
         }
     }
 
-    fn convert_response(response: OpenAiResponse) -> ChatResponse {
+    fn convert_response(
+        response: OpenAiResponse,
+        request_debug: Option<String>,
+        response_debug: Option<String>,
+    ) -> ChatResponse {
         let thinking = response
             .choices
             .first()
-            .and_then(|choice| choice.message.reasoning_content.clone())
+            .and_then(|choice| {
+                choice
+                    .message
+                    .reasoning_content
+                    .clone()
+                    .or_else(|| choice.message.reasoning.clone())
+            })
             .map(|text| ThinkingOutput {
                 text: Some(text),
                 signature: None,
@@ -340,6 +354,14 @@ impl OpenAiClient {
                 output_tokens: response.usage.completion_tokens,
             },
             thinking,
+            debug: if request_debug.is_some() || response_debug.is_some() {
+                Some(DebugTrace {
+                    request: request_debug,
+                    response: response_debug,
+                })
+            } else {
+                None
+            },
         }
     }
 }
@@ -349,6 +371,8 @@ impl AiClient for OpenAiClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
         let url = Self::chat_completions_url(&self.config.base_url);
         let openai_request = Self::convert_request(request, &self.config.base_url, false);
+        let request_debug =
+            capture_debug_json(&format!("openai request POST {}", url), &openai_request);
 
         let response = self
             .client
@@ -366,6 +390,9 @@ impl AiClient for OpenAiClient {
             .await
             .map_err(|error| AiError::Http(error.to_string()))?;
 
+        let response_debug =
+            capture_debug_text(&format!("openai response {} {}", status, url), body.clone());
+
         if !status.is_success() {
             return Err(api_error_from_response(
                 status,
@@ -377,7 +404,11 @@ impl AiClient for OpenAiClient {
         let openai_response: OpenAiResponse =
             serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
 
-        Ok(Self::convert_response(openai_response))
+        Ok(Self::convert_response(
+            openai_response,
+            request_debug,
+            response_debug,
+        ))
     }
 
     fn chat_stream(
@@ -388,8 +419,13 @@ impl AiClient for OpenAiClient {
         let openai_request = Self::convert_request(request, &self.config.base_url, true);
         let api_key = self.config.api_key.clone();
         let base_url = self.config.base_url.clone();
+        let request_debug = capture_debug_json(
+            &format!("openai stream request POST {}", url),
+            &openai_request,
+        );
 
         let stream = async_stream::stream! {
+            let mut request_debug = request_debug;
             let response = reqwest::Client::new()
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", api_key))
@@ -409,6 +445,10 @@ impl AiClient for OpenAiClient {
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
+                let _ = capture_debug_text(
+                    &format!("openai stream response {} {}", status, url),
+                    body.clone(),
+                );
                 yield Err(api_error_from_response(status, &body, &base_url));
                 return;
             }
@@ -441,6 +481,8 @@ impl AiClient for OpenAiClient {
                         continue;
                     }
 
+                    let response_debug = capture_debug_text("openai stream sse", line.to_string());
+
                     let data = &line[6..];
                     if data == "[DONE]" {
                         yield Ok(StreamChunk {
@@ -448,6 +490,14 @@ impl AiClient for OpenAiClient {
                             thinking_delta: None,
                             thinking_signature: None,
                             done: true,
+                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                Some(DebugTrace {
+                                    request: request_debug.take(),
+                                    response: response_debug,
+                                })
+                            } else {
+                                None
+                            },
                         });
                         return;
                     }
@@ -459,7 +509,11 @@ impl AiClient for OpenAiClient {
 
                     if let Some(choice) = stream_response.choices.first() {
                         let delta = choice.delta.content.clone().unwrap_or_default();
-                        let thinking_delta = choice.delta.reasoning_content.clone();
+                        let thinking_delta = choice
+                            .delta
+                            .reasoning_content
+                            .clone()
+                            .or_else(|| choice.delta.reasoning.clone());
                         let done = choice.finish_reason.is_some();
 
                         yield Ok(StreamChunk {
@@ -467,6 +521,14 @@ impl AiClient for OpenAiClient {
                             thinking_delta,
                             thinking_signature: None,
                             done,
+                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                Some(DebugTrace {
+                                    request: request_debug.take(),
+                                    response: response_debug,
+                                })
+                            } else {
+                                None
+                            },
                         });
 
                         if done {
@@ -481,6 +543,10 @@ impl AiClient for OpenAiClient {
                 thinking_delta: None,
                 thinking_signature: None,
                 done: true,
+                debug: request_debug.map(|request| DebugTrace {
+                    request: Some(request),
+                    response: None,
+                }),
             });
         };
 

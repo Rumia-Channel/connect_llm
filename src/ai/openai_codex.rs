@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use super::{
-    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, StreamChunk, ThinkingConfig,
-    ThinkingEffort, ThinkingOutput, Usage,
+    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
+    ThinkingConfig, ThinkingEffort, ThinkingOutput, Usage, capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use rand::{RngCore, rngs::OsRng};
@@ -1028,7 +1028,11 @@ impl OpenAiCodexClient {
         }
     }
 
-    fn convert_response(response: OpenAiCodexResponse) -> ChatResponse {
+    fn convert_response(
+        response: OpenAiCodexResponse,
+        request_debug: Option<String>,
+        response_debug: Option<String>,
+    ) -> ChatResponse {
         let usage = response.usage.unwrap_or_default();
 
         ChatResponse {
@@ -1040,6 +1044,14 @@ impl OpenAiCodexClient {
                 output_tokens: usage.output_tokens,
             },
             thinking: Self::extract_thinking_from_output(&response.output),
+            debug: if request_debug.is_some() || response_debug.is_some() {
+                Some(DebugTrace {
+                    request: request_debug,
+                    response: response_debug,
+                })
+            } else {
+                None
+            },
         }
     }
 
@@ -1131,6 +1143,8 @@ impl AiClient for OpenAiCodexClient {
         let auth = self.resolve_auth().await?;
         let url = Self::endpoint_url(&self.config.base_url);
         let request = Self::convert_request(request, true);
+        let request_debug =
+            capture_debug_json(&format!("openai_codex request POST {}", url), &request);
 
         let mut builder = self
             .client
@@ -1154,6 +1168,10 @@ impl AiClient for OpenAiCodexClient {
             .text()
             .await
             .map_err(|error| AiError::Http(error.to_string()))?;
+        let response_debug = capture_debug_text(
+            &format!("openai_codex response {} {}", status, url),
+            body.clone(),
+        );
 
         if !status.is_success() {
             return Err(api_error_from_response(status, &body));
@@ -1198,7 +1216,7 @@ impl AiClient for OpenAiCodexClient {
         let response = final_response.ok_or_else(|| {
             AiError::Parse("missing response.completed event in Codex stream".to_string())
         })?;
-        let mut response = Self::convert_response(response);
+        let mut response = Self::convert_response(response, request_debug, response_debug);
         if response.content.is_empty() && !content.is_empty() {
             response.content = content;
         }
@@ -1220,8 +1238,14 @@ impl AiClient for OpenAiCodexClient {
         let client = self.client.clone();
         let config = self.config.clone();
         let request = Self::convert_request(request, true);
+        let endpoint_url = Self::endpoint_url(&config.base_url);
+        let request_debug = capture_debug_json(
+            &format!("openai_codex stream request POST {}", endpoint_url),
+            &request,
+        );
 
         let stream = async_stream::stream! {
+            let mut request_debug = request_debug;
             let auth = match OpenAiCodexClient::new(config.clone()).resolve_auth().await {
                 Ok(auth) => auth,
                 Err(error) => {
@@ -1231,7 +1255,7 @@ impl AiClient for OpenAiCodexClient {
             };
 
             let mut builder = client
-                .post(OpenAiCodexClient::endpoint_url(&config.base_url))
+                .post(&endpoint_url)
                 .header("Authorization", format!("Bearer {}", auth.access_token))
                 .header("Content-Type", "application/json")
                 .header("Accept", "text/event-stream")
@@ -1253,6 +1277,10 @@ impl AiClient for OpenAiCodexClient {
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
+                let _ = capture_debug_text(
+                    &format!("openai_codex stream response {} {}", status, endpoint_url),
+                    body.clone(),
+                );
                 yield Err(api_error_from_response(status, &body));
                 return;
             }
@@ -1286,12 +1314,22 @@ impl AiClient for OpenAiCodexClient {
                     }
 
                     let data = &line[6..];
+                    let response_debug =
+                        capture_debug_text("openai_codex stream sse", line.to_string());
                     if data == "[DONE]" {
                         yield Ok(StreamChunk {
                             delta: String::new(),
                             thinking_delta: None,
                             thinking_signature: None,
                             done: true,
+                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                Some(DebugTrace {
+                                    request: request_debug.take(),
+                                    response: response_debug,
+                                })
+                            } else {
+                                None
+                            },
                         });
                         return;
                     }
@@ -1312,6 +1350,14 @@ impl AiClient for OpenAiCodexClient {
                                 thinking_delta: None,
                                 thinking_signature: None,
                                 done: false,
+                                debug: if request_debug.is_some() || response_debug.is_some() {
+                                    Some(DebugTrace {
+                                        request: request_debug.take(),
+                                        response: response_debug.clone(),
+                                    })
+                                } else {
+                                    None
+                                },
                             });
                         }
                         "response.reasoning_summary_text.delta" => {
@@ -1324,6 +1370,14 @@ impl AiClient for OpenAiCodexClient {
                                 thinking_delta,
                                 thinking_signature: None,
                                 done: false,
+                                debug: if request_debug.is_some() || response_debug.is_some() {
+                                    Some(DebugTrace {
+                                        request: request_debug.take(),
+                                        response: response_debug.clone(),
+                                    })
+                                } else {
+                                    None
+                                },
                             });
                         }
                         "response.completed" => {
@@ -1332,6 +1386,14 @@ impl AiClient for OpenAiCodexClient {
                                 thinking_delta: None,
                                 thinking_signature: None,
                                 done: true,
+                                debug: if request_debug.is_some() || response_debug.is_some() {
+                                    Some(DebugTrace {
+                                        request: request_debug.take(),
+                                        response: response_debug,
+                                    })
+                                } else {
+                                    None
+                                },
                             });
                             return;
                         }
@@ -1345,6 +1407,10 @@ impl AiClient for OpenAiCodexClient {
                 thinking_delta: None,
                 thinking_signature: None,
                 done: true,
+                debug: request_debug.map(|request| DebugTrace {
+                    request: Some(request),
+                    response: None,
+                }),
             });
         };
 

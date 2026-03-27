@@ -12,7 +12,49 @@ pub use openai_codex::{
 };
 use providers::{ApiStyle, ProviderSpec};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
+
+pub fn set_debug_logging(enabled: bool) {
+    DEBUG_LOGGING.store(enabled, Ordering::Relaxed);
+}
+
+pub fn debug_logging_enabled() -> bool {
+    DEBUG_LOGGING.load(Ordering::Relaxed)
+}
+
+pub(crate) fn debug_log(label: &str, body: &str) {
+    if !debug_logging_enabled() {
+        return;
+    }
+
+    eprintln!("[conect_llm debug] {}", label);
+    eprintln!("{}", body);
+}
+
+pub(crate) fn capture_debug_json<T: Serialize>(label: &str, value: &T) -> Option<String> {
+    if !debug_logging_enabled() {
+        return None;
+    }
+
+    let body = serde_json::to_string_pretty(value).ok()?;
+    debug_log(label, &body);
+    Some(body)
+}
+
+pub(crate) fn capture_debug_text(label: &str, body: impl Into<String>) -> Option<String> {
+    if !debug_logging_enabled() {
+        return None;
+    }
+
+    let body = body.into();
+    debug_log(label, &body);
+    Some(body)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -28,6 +70,7 @@ pub struct StreamChunk {
     pub thinking_delta: Option<String>,
     pub thinking_signature: Option<String>,
     pub done: bool,
+    pub debug: Option<DebugTrace>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,12 +95,22 @@ pub struct ChatResponse {
     pub usage: Usage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<DebugTrace>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DebugTrace {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -93,7 +146,7 @@ impl ThinkingConfig {
     pub fn enabled() -> Self {
         Self {
             enabled: true,
-            effort: Some(ThinkingEffort::Medium),
+            effort: None,
             budget_tokens: Some(1024),
             display: None,
             clear_history: None,

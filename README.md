@@ -18,6 +18,7 @@
 - `AiClient`
 - `ChatRequest`
 - `ChatResponse`
+- `DebugTrace`
 - `Message`
 - `StreamChunk`
 - `ThinkingConfig`
@@ -25,6 +26,26 @@
 - `ThinkingOutput`
 
 `src/lib.rs` から再 export されているので、通常は `conect_llm::...` で参照できます。
+
+## デバッグ
+
+ライブラリ全体の debug flag は `set_debug_logging(true)` で有効にできます。
+
+```rust
+use conect_llm::set_debug_logging;
+
+set_debug_logging(true);
+```
+
+有効化すると次の 2 つが起きます。
+
+- stderr に provider ごとの raw request / raw response / raw SSE が出る
+- `ChatResponse.debug` と `StreamChunk.debug` に raw payload が入る
+
+`DebugTrace` は共通で次の形です。
+
+- `request`: 生の request body
+- `response`: 生の response body または stream event
 
 ## 基本的な使い方
 
@@ -69,6 +90,15 @@ let response = client.chat(request).await?;
 
 println!("{}", response.content);
 
+if let Some(debug) = &response.debug {
+    if let Some(request) = &debug.request {
+        eprintln!("raw request: {}", request);
+    }
+    if let Some(response) = &debug.response {
+        eprintln!("raw response: {}", response);
+    }
+}
+
 if let Some(thinking) = &response.thinking {
     if let Some(text) = &thinking.text {
         println!("thinking: {}", text);
@@ -112,6 +142,15 @@ while let Some(chunk) = stream.next().await {
         eprintln!("signature={}", signature);
     }
 
+    if let Some(debug) = &chunk.debug {
+        if let Some(request) = &debug.request {
+            eprintln!("raw request: {}", request);
+        }
+        if let Some(response) = &debug.response {
+            eprintln!("raw event: {}", response);
+        }
+    }
+
     if chunk.done {
         break;
     }
@@ -124,6 +163,7 @@ while let Some(chunk) = stream.next().await {
 - `thinking_delta`: Thinking の差分
 - `thinking_signature`: Thinking に紐づく署名差分
 - `done`: ストリーム完了
+- `debug`: debug flag 有効時の raw request / raw event
 
 ### 3. 次のターンへ渡す
 
@@ -137,7 +177,7 @@ let assistant_message = Message {
 };
 ```
 
-この形にしておくと、Anthropic 系では `signature` や `redacted` を含む形で再送できます。OpenAI 互換系では `thinking.text` が `reasoning_content` として使われます。
+この形にしておくと、Anthropic 系では `signature` や `redacted` を含む形で再送できます。OpenAI 互換系では `thinking.text` が `reasoning_content` として使われる想定ですが、provider によっては Sakura のように `reasoning` フィールドで返す実装もあるため、このライブラリ側で吸収しています。
 
 ## Thinking の設定
 
@@ -177,7 +217,9 @@ let thinking = ThinkingConfig {
 - `ThinkingConfig::enabled_with_effort()`
 - `ThinkingConfig::disabled()`
 
-ただし、すべての provider がこの設定を受け付けるわけではありません。受け付け可否は `AiProvider::supports_thinking_config()` で判定します。
+`ThinkingConfig::enabled()` は共通の「thinking を出す」設定です。Codex の思考レベルを変えたいときだけ `enabled_with_effort()` か、`effort: Some(...)` を使います。
+
+ただし、すべての provider が request 側の設定を受け付けるわけではありません。受け付け可否は `AiProvider::supports_thinking_config()` で判定します。Sakura のように request 側では指定できなくても、レスポンス側で `reasoning_content` や `reasoning` を返す provider はあります。
 
 ## Provider 一覧
 
@@ -187,7 +229,7 @@ let thinking = ThinkingConfig {
 | `AiProvider::GoogleAiStudio` | OpenAI-compatible | No | Yes |
 | `AiProvider::Gemini` | Gemini native | Yes | Yes |
 | `AiProvider::OpenAi` | OpenAI-compatible | No | No |
-| `AiProvider::OpenAiCodex` | ChatGPT Codex backend | No | Yes |
+| `AiProvider::OpenAiCodex` | ChatGPT Codex backend | Yes | Yes |
 | `AiProvider::Sakura` | OpenAI-compatible | Yes | No |
 | `AiProvider::Kimi` | OpenAI-compatible | Yes | Yes |
 | `AiProvider::KimiCoding` | Anthropic | Yes | Yes |
@@ -222,9 +264,9 @@ println!("{}", provider.supports_thinking_config());
 - `AiProvider::OpenAiCodex` では `api_key` を空にすると `CODEX_HOME/auth.json` または `~/.codex/auth.json` から access token / refresh token を読みます。
 - `AiProvider::OpenAiCodex` は access token の期限が近い場合、`refresh_token` を使って `auth.openai.com/oauth/token` で更新し、`auth.json` へ書き戻します。
 - `AiProvider::OpenAiCodex` では `ChatRequest.model` でモデルを選べます。
-- `AiProvider::OpenAiCodex` では `ChatRequest.thinking.effort` を `reasoning.effort` として送ります。`ThinkingConfig::enabled()` は `medium` として扱います。
+- `AiProvider::OpenAiCodex` では `ChatRequest.thinking.effort` を `reasoning.effort` として送ります。`ThinkingConfig::enabled()` は thinking を有効にするだけで、effort を明示しない場合は Codex 側のデフォルトに委ねます。
 - `AiProvider::GoogleAiStudio` は request 側で Gemini の `thinking_config` を送れますが、このライブラリでは structured thinking output の公開 capability は `false` にしています。
-- OpenAI 互換 provider でも `reasoning_content` を返す実装なら、transport 側は受け取れるようにしてあります。
+- OpenAI 互換 provider でも `reasoning_content` または `reasoning` を返す実装なら、transport 側は受け取れるようにしてあります。
 - `Message.thinking` は provider によっては一部しか使われません。OpenAI 互換系では主に `text` を再送します。
 - `chat_stream()` は `BoxStream<'static, Result<StreamChunk, AiError>>` を返します。
 
@@ -311,7 +353,7 @@ let request = ChatRequest {
 };
 ```
 
-Codex ではこの `thinking.effort` を `reasoning.effort` として送ります。モデルは `AiConfig.model` と `ChatRequest.model` のどちらでも指定できますが、実際に送信されるのは `ChatRequest.model` です。
+Codex ではこの `thinking.effort` を `reasoning.effort` として送ります。thinking の ON/OFF 自体は `ThinkingConfig::enabled()` / `ThinkingConfig::disabled()` で切り替え、Codex の強さだけ変えたいときに `effort` を足す形です。モデルは `AiConfig.model` と `ChatRequest.model` のどちらでも指定できますが、実際に送信されるのは `ChatRequest.model` です。
 
 ## 開発
 

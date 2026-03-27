@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use super::{
-    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, StreamChunk, ThinkingConfig,
-    ThinkingDisplay, ThinkingOutput, Usage,
+    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
+    ThinkingConfig, ThinkingDisplay, ThinkingOutput, Usage, capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -232,7 +232,11 @@ impl AnthropicClient {
         }
     }
 
-    fn convert_response(response: AnthropicResponse) -> ChatResponse {
+    fn convert_response(
+        response: AnthropicResponse,
+        request_debug: Option<String>,
+        response_debug: Option<String>,
+    ) -> ChatResponse {
         let content = response
             .content
             .iter()
@@ -270,6 +274,14 @@ impl AnthropicClient {
                 output_tokens: response.usage.output_tokens,
             },
             thinking,
+            debug: if request_debug.is_some() || response_debug.is_some() {
+                Some(DebugTrace {
+                    request: request_debug,
+                    response: response_debug,
+                })
+            } else {
+                None
+            },
         }
     }
 }
@@ -279,6 +291,10 @@ impl AiClient for AnthropicClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
         let url = format!("{}/v1/messages", self.config.base_url);
         let anthropic_request = Self::convert_request(request);
+        let request_debug = capture_debug_json(
+            &format!("anthropic request POST {}", url),
+            &anthropic_request,
+        );
 
         let response = self
             .client
@@ -296,6 +312,10 @@ impl AiClient for AnthropicClient {
             .text()
             .await
             .map_err(|error| AiError::Http(error.to_string()))?;
+        let response_debug = capture_debug_text(
+            &format!("anthropic response {} {}", status, url),
+            body.clone(),
+        );
 
         if !status.is_success() {
             if let Ok(error) = serde_json::from_str::<AnthropicError>(&body) {
@@ -310,7 +330,11 @@ impl AiClient for AnthropicClient {
         let anthropic_response: AnthropicResponse =
             serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
 
-        Ok(Self::convert_response(anthropic_response))
+        Ok(Self::convert_response(
+            anthropic_response,
+            request_debug,
+            response_debug,
+        ))
     }
 
     fn chat_stream(
@@ -321,8 +345,13 @@ impl AiClient for AnthropicClient {
         let mut anthropic_request = Self::convert_request(request);
         anthropic_request.stream = Some(true);
         let api_key = self.config.api_key.clone();
+        let request_debug = capture_debug_json(
+            &format!("anthropic stream request POST {}", url),
+            &anthropic_request,
+        );
 
         let stream = async_stream::stream! {
+            let mut request_debug = request_debug;
             let response = reqwest::Client::new()
                 .post(&url)
                 .header("x-api-key", &api_key)
@@ -344,6 +373,10 @@ impl AiClient for AnthropicClient {
 
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
+                let _ = capture_debug_text(
+                    &format!("anthropic stream response {} {}", status, url),
+                    body.clone(),
+                );
                 yield Err(AiError::Api(format!("HTTP {}: {}", status, body)));
                 return;
             }
@@ -352,6 +385,7 @@ impl AiClient for AnthropicClient {
             let mut buffer = String::new();
             let mut pending_event: Option<String> = None;
             let mut pending_data: Option<String> = None;
+            let mut pending_debug_lines: Vec<String> = Vec::new();
 
             while let Some(chunk_result) = stream.next().await {
                 let chunk = match chunk_result {
@@ -374,8 +408,19 @@ impl AiClient for AnthropicClient {
                     buffer = buffer[pos + 1..].to_string();
 
                     let line_trimmed = line.trim_end_matches('\r').trim_end();
+                    if !line_trimmed.is_empty() {
+                        let _ = capture_debug_text("anthropic stream sse", line_trimmed.to_string());
+                        pending_debug_lines.push(line_trimmed.to_string());
+                    }
 
                     if line_trimmed.is_empty() {
+                        let response_debug = if pending_debug_lines.is_empty() {
+                            None
+                        } else {
+                            Some(pending_debug_lines.join("\n"))
+                        };
+                        pending_debug_lines.clear();
+
                         if let (Some(event_type), Some(data)) =
                             (pending_event.take(), pending_data.take())
                         {
@@ -386,6 +431,14 @@ impl AiClient for AnthropicClient {
                                         thinking_delta: None,
                                         thinking_signature: None,
                                         done: true,
+                                        debug: if request_debug.is_some() || response_debug.is_some() {
+                                            Some(DebugTrace {
+                                                request: request_debug.take(),
+                                                response: response_debug,
+                                            })
+                                        } else {
+                                            None
+                                        },
                                     });
                                     return;
                                 }
@@ -406,6 +459,14 @@ impl AiClient for AnthropicClient {
                                                             thinking_delta: None,
                                                             thinking_signature: None,
                                                             done: false,
+                                                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                                                Some(DebugTrace {
+                                                                    request: request_debug.take(),
+                                                                    response: response_debug.clone(),
+                                                                })
+                                                            } else {
+                                                                None
+                                                            },
                                                         });
                                                     }
                                                 }
@@ -416,6 +477,14 @@ impl AiClient for AnthropicClient {
                                                             thinking_delta: Some(thinking),
                                                             thinking_signature: None,
                                                             done: false,
+                                                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                                                Some(DebugTrace {
+                                                                    request: request_debug.take(),
+                                                                    response: response_debug.clone(),
+                                                                })
+                                                            } else {
+                                                                None
+                                                            },
                                                         });
                                                     }
                                                 }
@@ -426,6 +495,14 @@ impl AiClient for AnthropicClient {
                                                             thinking_delta: None,
                                                             thinking_signature: Some(signature),
                                                             done: false,
+                                                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                                                Some(DebugTrace {
+                                                                    request: request_debug.take(),
+                                                                    response: response_debug.clone(),
+                                                                })
+                                                            } else {
+                                                                None
+                                                            },
                                                         });
                                                     }
                                                 }
@@ -455,6 +532,10 @@ impl AiClient for AnthropicClient {
                 thinking_delta: None,
                 thinking_signature: None,
                 done: true,
+                debug: request_debug.map(|request| DebugTrace {
+                    request: Some(request),
+                    response: None,
+                }),
             });
         };
 

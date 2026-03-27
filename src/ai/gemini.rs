@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use super::{
-    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, StreamChunk, ThinkingOutput, Usage,
+    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
+    ThinkingOutput, Usage, capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -257,7 +258,12 @@ impl GeminiClient {
         (content, thinking)
     }
 
-    fn convert_response(response: GeminiResponse, fallback_model: &str) -> ChatResponse {
+    fn convert_response(
+        response: GeminiResponse,
+        fallback_model: &str,
+        request_debug: Option<String>,
+        response_debug: Option<String>,
+    ) -> ChatResponse {
         let candidate = response.candidates.first();
         let (content, thinking) = match candidate {
             Some(candidate) => Self::parse_candidate(candidate),
@@ -288,6 +294,14 @@ impl GeminiClient {
                     + usage.thoughts_token_count.unwrap_or(0),
             },
             thinking,
+            debug: if request_debug.is_some() || response_debug.is_some() {
+                Some(DebugTrace {
+                    request: request_debug,
+                    response: response_debug,
+                })
+            } else {
+                None
+            },
         }
     }
 }
@@ -298,6 +312,8 @@ impl AiClient for GeminiClient {
         let url = Self::generate_content_url(&self.config.base_url, &request.model);
         let request_model = request.model.clone();
         let gemini_request = Self::convert_request(request);
+        let request_debug =
+            capture_debug_json(&format!("gemini request POST {}", url), &gemini_request);
 
         let response = self
             .client
@@ -314,6 +330,8 @@ impl AiClient for GeminiClient {
             .text()
             .await
             .map_err(|error| AiError::Http(error.to_string()))?;
+        let response_debug =
+            capture_debug_text(&format!("gemini response {} {}", status, url), body.clone());
 
         if !status.is_success() {
             if let Ok(error) = serde_json::from_str::<GeminiErrorEnvelope>(&body) {
@@ -336,7 +354,12 @@ impl AiClient for GeminiClient {
         let gemini_response: GeminiResponse =
             serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
 
-        Ok(Self::convert_response(gemini_response, &request_model))
+        Ok(Self::convert_response(
+            gemini_response,
+            &request_model,
+            request_debug,
+            response_debug,
+        ))
     }
 
     fn chat_stream(
@@ -347,8 +370,13 @@ impl AiClient for GeminiClient {
         let api_key = self.config.api_key.clone();
         let request_model = request.model.clone();
         let gemini_request = Self::convert_request(request);
+        let request_debug = capture_debug_json(
+            &format!("gemini stream request POST {}", url),
+            &gemini_request,
+        );
 
         let stream = async_stream::stream! {
+            let mut request_debug = request_debug;
             let response = reqwest::Client::new()
                 .post(&url)
                 .header("x-goog-api-key", api_key)
@@ -368,6 +396,10 @@ impl AiClient for GeminiClient {
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
+                let _ = capture_debug_text(
+                    &format!("gemini stream response {} {}", status, url),
+                    body.clone(),
+                );
                 if let Ok(error) = serde_json::from_str::<GeminiErrorEnvelope>(&body) {
                     let mut parts = vec![format!("HTTP {}", status)];
                     if let Some(code) = error.error.code {
@@ -411,6 +443,7 @@ impl AiClient for GeminiClient {
                     }
 
                     let data = &line[6..];
+                    let response_debug = capture_debug_text("gemini stream sse", line.to_string());
                     let stream_response: GeminiResponse = match serde_json::from_str(data) {
                         Ok(response) => response,
                         Err(_) => continue,
@@ -428,6 +461,14 @@ impl AiClient for GeminiClient {
                             thinking_delta: Some(thinking_text),
                             thinking_signature: None,
                             done: false,
+                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                Some(DebugTrace {
+                                    request: request_debug.take(),
+                                    response: response_debug.clone(),
+                                })
+                            } else {
+                                None
+                            },
                         });
                     }
 
@@ -437,6 +478,14 @@ impl AiClient for GeminiClient {
                             thinking_delta: None,
                             thinking_signature: Some(signature),
                             done: false,
+                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                Some(DebugTrace {
+                                    request: request_debug.take(),
+                                    response: response_debug.clone(),
+                                })
+                            } else {
+                                None
+                            },
                         });
                     }
 
@@ -446,6 +495,14 @@ impl AiClient for GeminiClient {
                             thinking_delta: None,
                             thinking_signature: None,
                             done: false,
+                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                Some(DebugTrace {
+                                    request: request_debug.take(),
+                                    response: response_debug.clone(),
+                                })
+                            } else {
+                                None
+                            },
                         });
                     }
 
@@ -455,6 +512,14 @@ impl AiClient for GeminiClient {
                             thinking_delta: None,
                             thinking_signature: None,
                             done: true,
+                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                Some(DebugTrace {
+                                    request: request_debug.take(),
+                                    response: response_debug,
+                                })
+                            } else {
+                                None
+                            },
                         });
                         return;
                     }
@@ -467,6 +532,10 @@ impl AiClient for GeminiClient {
                 thinking_delta: None,
                 thinking_signature: None,
                 done: true,
+                debug: request_debug.map(|request| DebugTrace {
+                    request: Some(request),
+                    response: None,
+                }),
             });
         };
 

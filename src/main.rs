@@ -1,5 +1,6 @@
 use conect_llm::{
-    AiConfig, AiProvider, ChatRequest, Message, ThinkingConfig, ThinkingEffort, ThinkingOutput,
+    AiConfig, AiProvider, ChatRequest, DebugTrace, Message, ThinkingConfig, ThinkingEffort,
+    ThinkingOutput, set_debug_logging,
 };
 use futures_util::StreamExt;
 use std::io::{self, Write};
@@ -48,8 +49,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let api_key = prompt("API key", api_key_hint)?;
 
-    let mut thinking = select_thinking_config(provider)?;
+    let mut thinking_enabled = select_thinking_enabled(provider)?;
+    let mut codex_effort = select_codex_effort(provider)?;
     let mut use_stream = select_stream_mode()?;
+    let mut debug_enabled = select_debug_mode()?;
+    set_debug_logging(debug_enabled);
     let client = provider.create_client(AiConfig {
         api_key,
         base_url,
@@ -58,12 +62,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!(
-        "Commands: /help, /reset, /model <id>, /thinking <off|minimal|low|medium|high|xhigh>, /stream <on|off>, /exit"
+        "Commands: /help, /reset, /model <id>, /thinking <on|off>, /codex-effort <default|minimal|low|medium|high|xhigh>, /stream <on|off>, /debug <on|off>, /exit"
     );
     println!("Provider: {}", provider.name());
     println!("Model: {}", model);
-    println!("Thinking config: {}", describe_thinking(thinking.as_ref()));
+    println!(
+        "Thinking output: {}",
+        if thinking_enabled { "on" } else { "off" }
+    );
+    println!("Codex effort: {}", describe_codex_effort(codex_effort));
     println!("Stream: {}", if use_stream { "on" } else { "off" });
+    println!("Debug: {}", if debug_enabled { "on" } else { "off" });
     println!();
 
     let mut messages: Vec<Message> = Vec::new();
@@ -84,8 +93,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("Commands:");
             println!("  /reset");
             println!("  /model <id>");
-            println!("  /thinking <off|minimal|low|medium|high|xhigh>");
+            println!("  /thinking <on|off>");
+            println!("  /codex-effort <default|minimal|low|medium|high|xhigh>");
             println!("  /stream <on|off>");
+            println!("  /debug <on|off>");
             println!("  /exit");
             continue;
         }
@@ -107,16 +118,30 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        if let Some(level) = trimmed.strip_prefix("/thinking ") {
-            match parse_thinking_level(level.trim()) {
+        if let Some(mode) = trimmed.strip_prefix("/thinking ") {
+            match parse_thinking_toggle(mode.trim()) {
                 Ok(next) => {
-                    thinking = next;
+                    thinking_enabled = next;
                     println!(
-                        "thinking config set to {}",
-                        describe_thinking(thinking.as_ref())
+                        "thinking output set to {}",
+                        if thinking_enabled { "on" } else { "off" }
                     );
                 }
-                Err(error) => println!("invalid thinking level: {}", error),
+                Err(error) => println!("invalid thinking mode: {}", error),
+            }
+            continue;
+        }
+
+        if let Some(level) = trimmed.strip_prefix("/codex-effort ") {
+            match parse_codex_effort(level.trim()) {
+                Ok(next) => {
+                    codex_effort = next;
+                    println!(
+                        "codex effort set to {}",
+                        describe_codex_effort(codex_effort)
+                    );
+                }
+                Err(error) => println!("invalid codex effort: {}", error),
             }
             continue;
         }
@@ -135,6 +160,28 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
+        if let Some(mode) = trimmed.strip_prefix("/debug ") {
+            match parse_debug_mode(mode.trim()) {
+                Ok(next) => {
+                    debug_enabled = next;
+                    set_debug_logging(debug_enabled);
+                    println!(
+                        "debug mode set to {}",
+                        if debug_enabled { "on" } else { "off" }
+                    );
+                }
+                Err(error) => println!("invalid debug mode: {}", error),
+            }
+            continue;
+        }
+
+        let mut request_messages = sanitize_messages_for_request(&messages, thinking_enabled);
+        request_messages.push(Message {
+            role: "user".to_string(),
+            content: input.clone(),
+            thinking: None,
+        });
+
         messages.push(Message {
             role: "user".to_string(),
             content: input,
@@ -143,26 +190,32 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         let request = ChatRequest {
             model: model.clone(),
-            messages: messages.clone(),
+            messages: request_messages,
             max_tokens: Some(4096),
             temperature: None,
             system: None,
-            thinking: thinking.clone(),
+            thinking: build_thinking_config(provider, thinking_enabled, codex_effort),
         };
 
-        match send_request(client.as_ref(), request, use_stream).await {
+        match send_request(client.as_ref(), request, use_stream, thinking_enabled).await {
             Ok(response) => {
                 println!();
                 if !use_stream {
                     println!("assistant> {}", response.content.trim_end());
-                    print_thinking(response.thinking.as_ref());
+                    if thinking_enabled {
+                        print_thinking(response.thinking.as_ref());
+                    }
                     println!();
                 }
 
                 messages.push(Message {
                     role: "assistant".to_string(),
                     content: response.content,
-                    thinking: response.thinking,
+                    thinking: if thinking_enabled {
+                        response.thinking
+                    } else {
+                        None
+                    },
                 });
             }
             Err(error) => {
@@ -178,9 +231,14 @@ async fn send_request(
     client: &dyn conect_llm::AiClient,
     request: ChatRequest,
     use_stream: bool,
+    include_thinking: bool,
 ) -> Result<conect_llm::ChatResponse, conect_llm::AiError> {
     if !use_stream {
-        return client.chat(request).await;
+        let mut response = client.chat(request).await?;
+        if !include_thinking {
+            response.thinking = None;
+        }
+        return Ok(response);
     }
 
     let model = request.model.clone();
@@ -189,9 +247,20 @@ async fn send_request(
     let mut thinking_text = String::new();
     let mut printed_assistant_prefix = false;
     let mut printed_thinking_prefix = false;
+    let mut debug_request: Option<String> = None;
+    let mut debug_responses: Vec<String> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
+
+        if let Some(debug) = chunk.debug {
+            if debug_request.is_none() {
+                debug_request = debug.request;
+            }
+            if let Some(response) = debug.response {
+                debug_responses.push(response);
+            }
+        }
 
         if !chunk.delta.is_empty() {
             if !printed_assistant_prefix {
@@ -205,16 +274,18 @@ async fn send_request(
             content.push_str(&chunk.delta);
         }
 
-        if let Some(thinking_delta) = chunk.thinking_delta {
-            if !printed_thinking_prefix {
-                print!("\nthinking> ");
-                printed_thinking_prefix = true;
+        if include_thinking {
+            if let Some(thinking_delta) = chunk.thinking_delta {
+                if !printed_thinking_prefix {
+                    print!("\nthinking> ");
+                    printed_thinking_prefix = true;
+                }
+                print!("{}", thinking_delta);
+                io::stdout()
+                    .flush()
+                    .map_err(|error| conect_llm::AiError::Http(error.to_string()))?;
+                thinking_text.push_str(&thinking_delta);
             }
-            print!("{}", thinking_delta);
-            io::stdout()
-                .flush()
-                .map_err(|error| conect_llm::AiError::Http(error.to_string()))?;
-            thinking_text.push_str(&thinking_delta);
         }
 
         if chunk.done {
@@ -234,14 +305,26 @@ async fn send_request(
             input_tokens: 0,
             output_tokens: 0,
         },
-        thinking: if thinking_text.is_empty() {
-            None
-        } else {
+        thinking: if include_thinking && !thinking_text.is_empty() {
             Some(ThinkingOutput {
                 text: Some(thinking_text),
                 signature: None,
                 redacted: None,
             })
+        } else {
+            None
+        },
+        debug: if debug_request.is_some() || !debug_responses.is_empty() {
+            Some(DebugTrace {
+                request: debug_request,
+                response: if debug_responses.is_empty() {
+                    None
+                } else {
+                    Some(debug_responses.join("\n"))
+                },
+            })
+        } else {
+            None
         },
     })
 }
@@ -279,25 +362,31 @@ fn select_provider() -> Result<AiProvider, Box<dyn std::error::Error>> {
     }
 }
 
-fn select_thinking_config(
-    provider: AiProvider,
-) -> Result<Option<ThinkingConfig>, Box<dyn std::error::Error>> {
-    if !provider.supports_thinking_config() {
-        println!("Thinking config is not advertised for this provider.");
-        return Ok(None);
-    }
+fn select_thinking_enabled(provider: AiProvider) -> Result<bool, Box<dyn std::error::Error>> {
+    let default_value =
+        if provider.supports_thinking_output() || provider.supports_thinking_config() {
+            "on"
+        } else {
+            "off"
+        };
+    let input = prompt_default("thinking", default_value, "Available: on, off.")?;
+    parse_thinking_toggle(&input).map_err(|error| error.into())
+}
 
-    let default_level = if provider == AiProvider::OpenAiCodex {
+fn select_codex_effort(
+    provider: AiProvider,
+) -> Result<Option<ThinkingEffort>, Box<dyn std::error::Error>> {
+    let default_value = if provider == AiProvider::OpenAiCodex {
         "medium"
     } else {
-        "off"
+        "default"
     };
     let input = prompt_default(
-        "thinking",
-        default_level,
-        "Available: off, minimal, low, medium, high, xhigh.",
+        "codex effort",
+        default_value,
+        "Available: default, minimal, low, medium, high, xhigh.",
     )?;
-    parse_thinking_level(&input).map_err(|error| error.into())
+    parse_codex_effort(&input).map_err(|error| error.into())
 }
 
 fn select_stream_mode() -> Result<bool, Box<dyn std::error::Error>> {
@@ -305,26 +394,29 @@ fn select_stream_mode() -> Result<bool, Box<dyn std::error::Error>> {
     parse_stream_mode(&input).map_err(|error| error.into())
 }
 
-fn parse_thinking_level(value: &str) -> Result<Option<ThinkingConfig>, String> {
+fn select_debug_mode() -> Result<bool, Box<dyn std::error::Error>> {
+    let input = prompt_default("debug", "off", "Available: on, off.")?;
+    parse_debug_mode(&input).map_err(|error| error.into())
+}
+
+fn parse_thinking_toggle(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "on" | "true" | "yes" | "1" => Ok(true),
+        "off" | "false" | "no" | "0" => Ok(false),
+        _ => Err("expected on or off".to_string()),
+    }
+}
+
+fn parse_codex_effort(value: &str) -> Result<Option<ThinkingEffort>, String> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "" | "off" | "none" => Ok(None),
-        "minimal" => Ok(Some(ThinkingConfig::enabled_with_effort(
-            ThinkingEffort::Minimal,
-        ))),
-        "low" => Ok(Some(ThinkingConfig::enabled_with_effort(
-            ThinkingEffort::Low,
-        ))),
-        "medium" | "adaptive" => Ok(Some(ThinkingConfig::enabled_with_effort(
-            ThinkingEffort::Medium,
-        ))),
-        "high" => Ok(Some(ThinkingConfig::enabled_with_effort(
-            ThinkingEffort::High,
-        ))),
-        "xhigh" | "x-high" | "extra-high" => Ok(Some(ThinkingConfig::enabled_with_effort(
-            ThinkingEffort::XHigh,
-        ))),
-        _ => Err("expected off, minimal, low, medium, high, or xhigh".to_string()),
+        "" | "default" | "auto" => Ok(None),
+        "minimal" => Ok(Some(ThinkingEffort::Minimal)),
+        "low" => Ok(Some(ThinkingEffort::Low)),
+        "medium" | "adaptive" => Ok(Some(ThinkingEffort::Medium)),
+        "high" => Ok(Some(ThinkingEffort::High)),
+        "xhigh" | "x-high" | "extra-high" => Ok(Some(ThinkingEffort::XHigh)),
+        _ => Err("expected default, minimal, low, medium, high, or xhigh".to_string()),
     }
 }
 
@@ -336,22 +428,52 @@ fn parse_stream_mode(value: &str) -> Result<bool, String> {
     }
 }
 
-fn describe_thinking(thinking: Option<&ThinkingConfig>) -> String {
-    let Some(thinking) = thinking else {
-        return "off".to_string();
-    };
+fn parse_debug_mode(value: &str) -> Result<bool, String> {
+    parse_stream_mode(value)
+}
 
-    if !thinking.enabled {
-        return "off".to_string();
+fn describe_codex_effort(effort: Option<ThinkingEffort>) -> String {
+    match effort {
+        None => "default".to_string(),
+        Some(ThinkingEffort::Minimal) => "minimal".to_string(),
+        Some(ThinkingEffort::Low) => "low".to_string(),
+        Some(ThinkingEffort::Medium) => "medium".to_string(),
+        Some(ThinkingEffort::High) => "high".to_string(),
+        Some(ThinkingEffort::XHigh) => "xhigh".to_string(),
+    }
+}
+
+fn build_thinking_config(
+    provider: AiProvider,
+    thinking_enabled: bool,
+    codex_effort: Option<ThinkingEffort>,
+) -> Option<ThinkingConfig> {
+    if !thinking_enabled {
+        return if provider.supports_thinking_config() {
+            Some(ThinkingConfig::disabled())
+        } else {
+            None
+        };
     }
 
-    match thinking.effort.unwrap_or(ThinkingEffort::Medium) {
-        ThinkingEffort::Minimal => "minimal".to_string(),
-        ThinkingEffort::Low => "low".to_string(),
-        ThinkingEffort::Medium => "medium".to_string(),
-        ThinkingEffort::High => "high".to_string(),
-        ThinkingEffort::XHigh => "xhigh".to_string(),
+    let mut thinking = ThinkingConfig::enabled();
+    if provider == AiProvider::OpenAiCodex {
+        thinking.effort = codex_effort;
     }
+    Some(thinking)
+}
+
+fn sanitize_messages_for_request(messages: &[Message], include_thinking: bool) -> Vec<Message> {
+    messages
+        .iter()
+        .cloned()
+        .map(|mut message| {
+            if !include_thinking {
+                message.thinking = None;
+            }
+            message
+        })
+        .collect()
 }
 
 fn print_thinking(thinking: Option<&ThinkingOutput>) {
