@@ -1423,13 +1423,12 @@ impl AiClient for OpenAiCodexClient {
 
     async fn list_models(&self) -> Result<Vec<String>, AiError> {
         Ok(vec![
+            "gpt-5.1-codex-max".to_string(),
+            "gpt-5.1-codex".to_string(),
+            "gpt-5.1-codex-mini".to_string(),
+            "gpt-5.2-codex".to_string(),
             "gpt-5.4".to_string(),
             "gpt-5.4-mini".to_string(),
-            "gpt-5.3-codex".to_string(),
-            "gpt-5.3-codex-spark".to_string(),
-            "gpt-5.2".to_string(),
-            "gpt-5.2-codex".to_string(),
-            "gpt-5.1-codex".to_string(),
         ])
     }
 }

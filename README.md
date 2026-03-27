@@ -325,7 +325,7 @@ let provider = AiProvider::OpenAiCodex;
 let client = provider.create_client(AiConfig {
     api_key: std::env::var("OPENAI_OAUTH_ACCESS_TOKEN")?,
     base_url: provider.default_base_url().to_string(),
-    model: "gpt-5.4".to_string(),
+    model: "gpt-5.1-codex-max".to_string(),
 });
 ```
 
@@ -342,11 +342,11 @@ let provider = AiProvider::OpenAiCodex;
 let client = provider.create_client(AiConfig {
     api_key: String::new(),
     base_url: provider.default_base_url().to_string(),
-    model: "gpt-5.4-mini".to_string(),
+    model: "gpt-5.1-codex-mini".to_string(),
 });
 
 let request = ChatRequest {
-    model: "gpt-5.4".to_string(),
+    model: "gpt-5.1-codex-max".to_string(),
     messages: vec![Message {
         role: "user".to_string(),
         content: "この変更方針で進めて".to_string(),
@@ -408,7 +408,7 @@ let provider = AiProvider::GitHubCopilot;
 let client = provider.create_client(AiConfig {
     api_key: std::env::var("GITHUB_TOKEN")?,
     base_url: provider.default_base_url().to_string(),
-    model: "gpt-4o".to_string(),
+    model: "claude-sonnet-4.5".to_string(),
 });
 ```
 

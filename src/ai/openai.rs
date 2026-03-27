@@ -590,6 +590,7 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, A
     if !status.is_success() {
         if base_url.contains("api.z.ai/api/coding/paas/v4") {
             return Ok(vec![
+                "glm-5".to_string(),
                 "glm-4.7".to_string(),
                 "glm-4.6".to_string(),
                 "glm-4.5".to_string(),

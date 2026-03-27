@@ -570,7 +570,7 @@ impl AiClient for AnthropicClient {
                     "anthropic/k2p5".to_string(),
                 ]);
             }
-            return Ok(vec!["claude-3-5-sonnet-20241022".to_string()]);
+            return Ok(vec!["claude-sonnet-4-20250514".to_string()]);
         }
 
         #[derive(Deserialize)]
