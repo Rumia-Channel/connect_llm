@@ -1,4 +1,10 @@
 use conect_llm::{ThinkingOutput, ToolCall};
+use crossterm::{
+    cursor::{MoveToColumn, MoveUp},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
+};
 use std::io::{self, Write};
 
 pub(crate) fn print_thinking(thinking: Option<&ThinkingOutput>) {
@@ -52,4 +58,84 @@ pub(crate) fn prompt_default(label: &str, default: &str, hint: &str) -> Result<S
     } else {
         Ok(value.to_string())
     }
+}
+
+pub(crate) fn prompt_multiline(label: &str, hint: &str) -> Result<String, io::Error> {
+    let _ = hint;
+    let mut stdout = io::stdout();
+    enable_raw_mode()?;
+
+    let mut buffer = String::new();
+    let mut rendered_lines = 0usize;
+    render_multiline_prompt(&mut stdout, label, &buffer, &mut rendered_lines)?;
+
+    let result = loop {
+        match event::read()? {
+            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                match key.code {
+                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        break Ok(buffer);
+                    }
+                    KeyCode::Enter => buffer.push('\n'),
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        break Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "input cancelled",
+                        ));
+                    }
+                    KeyCode::Char(character) => {
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT)
+                        {
+                            buffer.push(character);
+                        }
+                    }
+                    KeyCode::Tab => buffer.push('\t'),
+                    _ => {}
+                }
+                render_multiline_prompt(&mut stdout, label, &buffer, &mut rendered_lines)?;
+            }
+            Event::Paste(text) => {
+                buffer.push_str(&text);
+                render_multiline_prompt(&mut stdout, label, &buffer, &mut rendered_lines)?;
+            }
+            _ => {}
+        }
+    };
+
+    disable_raw_mode()?;
+    println!();
+    result
+}
+
+fn render_multiline_prompt(
+    stdout: &mut io::Stdout,
+    label: &str,
+    buffer: &str,
+    rendered_lines: &mut usize,
+) -> Result<(), io::Error> {
+    if *rendered_lines > 0 {
+        execute!(stdout, MoveToColumn(0))?;
+        for _ in 1..*rendered_lines {
+            execute!(stdout, MoveUp(1), MoveToColumn(0))?;
+        }
+        execute!(stdout, Clear(ClearType::FromCursorDown))?;
+    }
+
+    let lines: Vec<&str> = if buffer.is_empty() {
+        vec![""]
+    } else {
+        buffer.split('\n').collect()
+    };
+
+    write!(stdout, "{}> {}", label, lines[0])?;
+    for line in lines.iter().skip(1) {
+        write!(stdout, "\r\n..  {}", line)?;
+    }
+    stdout.flush()?;
+    *rendered_lines = lines.len();
+    Ok(())
 }

@@ -2,7 +2,7 @@ mod io;
 mod settings;
 mod streaming;
 
-use self::io::{print_thinking, print_tool_calls, prompt, prompt_default};
+use self::io::{print_thinking, print_tool_calls, prompt, prompt_default, prompt_multiline};
 use self::settings::{
     build_thinking_config, describe_codex_effort, ensure_provider_auth_ready, parse_codex_effort,
     parse_debug_mode, parse_stream_mode, parse_thinking_toggle, sanitize_messages_for_request,
@@ -15,6 +15,7 @@ use conect_llm::{AiConfig, ChatRequest, ContextManager, Message, set_debug_loggi
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("conect_llm sample chat");
     println!("API key is only kept in this process memory.");
+    println!("Chat input uses Enter for newline and Ctrl+Enter to send.");
     println!();
 
     let provider = select_provider()?;
@@ -67,7 +68,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut messages: Vec<Message> = Vec::new();
 
     loop {
-        let input = prompt("you", "Type a prompt or /exit.")?;
+        let input = prompt_multiline("you", "Enter inserts newline. Ctrl+Enter sends.")?;
         let trimmed = input.trim();
 
         if trimmed.is_empty() {
