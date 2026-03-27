@@ -1,4 +1,6 @@
 pub mod anthropic;
+pub mod gemini;
+pub mod google_ai_studio;
 pub mod kimi;
 pub mod kimi_coding;
 pub mod openai;
@@ -9,6 +11,7 @@ pub mod zai_coding;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiStyle {
     Anthropic,
+    Gemini,
     OpenAi,
 }
 

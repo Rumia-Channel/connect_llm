@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod anthropic;
+pub mod gemini;
 pub mod openai;
 pub mod providers;
 
@@ -147,6 +148,8 @@ impl std::error::Error for AiError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiProvider {
     Anthropic,
+    GoogleAiStudio,
+    Gemini,
     OpenAi,
     Sakura,
     Kimi,
@@ -159,6 +162,8 @@ impl AiProvider {
     fn spec(&self) -> ProviderSpec {
         match self {
             AiProvider::Anthropic => providers::anthropic::spec(),
+            AiProvider::GoogleAiStudio => providers::google_ai_studio::spec(),
+            AiProvider::Gemini => providers::gemini::spec(),
             AiProvider::OpenAi => providers::openai::spec(),
             AiProvider::Sakura => providers::sakura::spec(),
             AiProvider::Kimi => providers::kimi::spec(),
@@ -177,6 +182,8 @@ impl AiProvider {
             4 => AiProvider::KimiCoding,
             5 => AiProvider::ZAi,
             6 => AiProvider::ZAiCoding,
+            7 => AiProvider::GoogleAiStudio,
+            8 => AiProvider::Gemini,
             _ => AiProvider::Sakura,
         }
     }
@@ -190,12 +197,16 @@ impl AiProvider {
             AiProvider::KimiCoding => 4,
             AiProvider::ZAi => 5,
             AiProvider::ZAiCoding => 6,
+            AiProvider::GoogleAiStudio => 7,
+            AiProvider::Gemini => 8,
         }
     }
 
     pub fn from_name(name: &str) -> Self {
         match name {
             "Anthropic" => AiProvider::Anthropic,
+            "GoogleAiStudio" | "Google AI Studio" => AiProvider::GoogleAiStudio,
+            "Gemini" => AiProvider::Gemini,
             "OpenAi" | "OpenAI" => AiProvider::OpenAi,
             "Sakura" => AiProvider::Sakura,
             "Kimi" => AiProvider::Kimi,
@@ -219,6 +230,7 @@ impl AiProvider {
             ApiStyle::Anthropic => {
                 Arc::new(anthropic::AnthropicClient::new(config)) as Arc<dyn AiClient>
             }
+            ApiStyle::Gemini => Arc::new(gemini::GeminiClient::new(config)) as Arc<dyn AiClient>,
             ApiStyle::OpenAi => Arc::new(openai::OpenAiClient::new(config)) as Arc<dyn AiClient>,
         }
     }

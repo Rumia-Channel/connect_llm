@@ -18,6 +18,8 @@ struct OpenAiRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<OpenAiThinkingRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extra_body: Option<OpenAiExtraBody>,
     stream: bool,
 }
 
@@ -35,6 +37,23 @@ struct OpenAiThinkingRequest {
     thinking_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     clear_thinking: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiExtraBody {
+    google: OpenAiGoogleExtraBody,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiGoogleExtraBody {
+    thinking_config: OpenAiGoogleThinkingConfig,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiGoogleThinkingConfig {
+    include_thoughts: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_budget: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,7 +195,10 @@ impl OpenAiClient {
 
     fn chat_completions_url(base_url: &str) -> String {
         let base_url = Self::normalized_base_url(base_url);
-        if base_url.ends_with("/v1") || base_url.contains("/paas/v4") {
+        if base_url.ends_with("/v1")
+            || base_url.contains("/paas/v4")
+            || base_url.ends_with("/openai")
+        {
             format!("{}/chat/completions", base_url)
         } else {
             format!("{}/v1/chat/completions", base_url)
@@ -185,7 +207,10 @@ impl OpenAiClient {
 
     fn models_url(base_url: &str) -> String {
         let base_url = Self::normalized_base_url(base_url);
-        if base_url.ends_with("/v1") || base_url.contains("/paas/v4") {
+        if base_url.ends_with("/v1")
+            || base_url.contains("/paas/v4")
+            || base_url.ends_with("/openai")
+        {
             format!("{}/models", base_url)
         } else {
             format!("{}/v1/models", base_url)
@@ -195,6 +220,10 @@ impl OpenAiClient {
     fn supports_reasoning_config(base_url: &str) -> bool {
         let base_url = Self::normalized_base_url(base_url);
         base_url.contains("api.moonshot.ai") || base_url.contains("api.z.ai")
+    }
+
+    fn is_google_openai_compat(base_url: &str) -> bool {
+        Self::normalized_base_url(base_url).contains("generativelanguage.googleapis.com")
     }
 
     fn convert_thinking_config(
@@ -216,6 +245,25 @@ impl OpenAiClient {
                 thinking.clear_history
             } else {
                 None
+            },
+        })
+    }
+
+    fn convert_google_extra_body(
+        base_url: &str,
+        thinking: Option<&ThinkingConfig>,
+    ) -> Option<OpenAiExtraBody> {
+        let thinking = thinking?;
+        if !thinking.enabled || !Self::is_google_openai_compat(base_url) {
+            return None;
+        }
+
+        Some(OpenAiExtraBody {
+            google: OpenAiGoogleExtraBody {
+                thinking_config: OpenAiGoogleThinkingConfig {
+                    include_thoughts: true,
+                    thinking_budget: thinking.budget_tokens,
+                },
             },
         })
     }
@@ -260,6 +308,7 @@ impl OpenAiClient {
             max_tokens,
             temperature,
             thinking: Self::convert_thinking_config(base_url, thinking.as_ref()),
+            extra_body: Self::convert_google_extra_body(base_url, thinking.as_ref()),
             stream,
         }
     }

@@ -172,6 +172,8 @@ let thinking = ThinkingConfig {
 | Provider | API style | Thinking 出力 | Thinking 設定 |
 | --- | --- | --- | --- |
 | `AiProvider::Anthropic` | Anthropic | Yes | Yes |
+| `AiProvider::GoogleAiStudio` | OpenAI-compatible | No | Yes |
+| `AiProvider::Gemini` | Gemini native | Yes | Yes |
 | `AiProvider::OpenAi` | OpenAI-compatible | No | No |
 | `AiProvider::Sakura` | OpenAI-compatible | Yes | No |
 | `AiProvider::Kimi` | OpenAI-compatible | Yes | Yes |
@@ -199,7 +201,10 @@ println!("{}", provider.supports_thinking_config());
 
 ## 注意点
 
+- `AiProvider::GoogleAiStudio` は `https://generativelanguage.googleapis.com/v1beta/openai` の OpenAI compatibility を使います。
+- `AiProvider::Gemini` は `generateContent` / `streamGenerateContent` を使う native Gemini API です。
 - `AiProvider::OpenAi` は現状 `chat.completions` ベースです。Thinking は公開 capability としては `false` 扱いです。
+- `AiProvider::GoogleAiStudio` は request 側で Gemini の `thinking_config` を送れますが、このライブラリでは structured thinking output の公開 capability は `false` にしています。
 - OpenAI 互換 provider でも `reasoning_content` を返す実装なら、transport 側は受け取れるようにしてあります。
 - `Message.thinking` は provider によっては一部しか使われません。OpenAI 互換系では主に `text` を再送します。
 - `chat_stream()` は `BoxStream<'static, Result<StreamChunk, AiError>>` を返します。
