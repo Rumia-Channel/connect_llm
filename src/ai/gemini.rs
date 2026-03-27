@@ -2,11 +2,13 @@
 
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    ThinkingOutput, Usage, capture_debug_json, capture_debug_text,
+    ThinkingOutput, ToolCall, ToolCallDelta, ToolChoice, ToolDefinition, Usage, capture_debug_json,
+    capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,6 +16,10 @@ struct GeminiRequest {
     contents: Vec<GeminiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     system_instruction: Option<GeminiContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<GeminiTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_config: Option<GeminiToolConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     generation_config: Option<GeminiGenerationConfig>,
 }
@@ -35,6 +41,54 @@ struct GeminiPart {
     thought: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thought_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_call: Option<GeminiFunctionCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_response: Option<GeminiFunctionResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFunctionCall {
+    name: String,
+    #[serde(default)]
+    args: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFunctionResponse {
+    name: String,
+    response: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiTool {
+    function_declarations: Vec<GeminiFunctionDeclaration>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFunctionDeclaration {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiToolConfig {
+    function_calling_config: GeminiFunctionCallingConfig,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFunctionCallingConfig {
+    mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed_function_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,8 +204,66 @@ impl GeminiClient {
 
     fn convert_role(role: &str) -> String {
         match role {
+            "tool" => "tool".to_string(),
             "assistant" | "model" => "model".to_string(),
             _ => "user".to_string(),
+        }
+    }
+
+    fn convert_tools(tools: &[ToolDefinition]) -> Option<Vec<GeminiTool>> {
+        if tools.is_empty() {
+            return None;
+        }
+
+        Some(vec![GeminiTool {
+            function_declarations: tools
+                .iter()
+                .map(|tool| GeminiFunctionDeclaration {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters: tool.input_schema.clone(),
+                })
+                .collect(),
+        }])
+    }
+
+    fn convert_tool_config(choice: Option<&ToolChoice>) -> Option<GeminiToolConfig> {
+        match choice? {
+            ToolChoice::Auto => Some(GeminiToolConfig {
+                function_calling_config: GeminiFunctionCallingConfig {
+                    mode: "AUTO",
+                    allowed_function_names: None,
+                },
+            }),
+            ToolChoice::None => Some(GeminiToolConfig {
+                function_calling_config: GeminiFunctionCallingConfig {
+                    mode: "NONE",
+                    allowed_function_names: None,
+                },
+            }),
+            ToolChoice::Required => Some(GeminiToolConfig {
+                function_calling_config: GeminiFunctionCallingConfig {
+                    mode: "ANY",
+                    allowed_function_names: None,
+                },
+            }),
+            ToolChoice::Tool(name) => Some(GeminiToolConfig {
+                function_calling_config: GeminiFunctionCallingConfig {
+                    mode: "ANY",
+                    allowed_function_names: Some(vec![name.clone()]),
+                },
+            }),
+        }
+    }
+
+    fn tool_result_object(value: Value) -> Value {
+        match value {
+            Value::Object(_) => value,
+            other => {
+                let mut object = Map::new();
+                object.insert("value".to_string(), other);
+                Value::Object(object)
+            }
         }
     }
 
@@ -160,6 +272,11 @@ impl GeminiClient {
             role,
             content,
             thinking,
+            tool_calls,
+            tool_call_id,
+            tool_name,
+            tool_result,
+            tool_error: _,
         } = message;
 
         let mut parts = Vec::new();
@@ -171,17 +288,53 @@ impl GeminiClient {
                         text: Some(text.clone()),
                         thought: Some(true),
                         thought_signature: None,
+                        function_call: None,
+                        function_response: None,
                     });
                 }
             }
         }
 
+        for tool_call in tool_calls {
+            parts.push(GeminiPart {
+                text: None,
+                thought: None,
+                thought_signature: None,
+                function_call: Some(GeminiFunctionCall {
+                    name: tool_call.name,
+                    args: tool_call.arguments,
+                }),
+                function_response: None,
+            });
+        }
+
+        if role == "tool" {
+            parts.push(GeminiPart {
+                text: None,
+                thought: None,
+                thought_signature: None,
+                function_call: None,
+                function_response: Some(GeminiFunctionResponse {
+                    name: tool_name.unwrap_or_else(|| "tool".to_string()),
+                    response: Self::tool_result_object(
+                        tool_result
+                            .or_else(|| tool_call_id.map(Value::String))
+                            .unwrap_or_else(|| Value::String(content.clone())),
+                    ),
+                }),
+            });
+        }
+
         let thought_signature = thinking.and_then(|thinking| thinking.signature);
-        parts.push(GeminiPart {
-            text: Some(content),
-            thought: None,
-            thought_signature,
-        });
+        if role != "tool" || !content.is_empty() {
+            parts.push(GeminiPart {
+                text: Some(content),
+                thought: None,
+                thought_signature,
+                function_call: None,
+                function_response: None,
+            });
+        }
 
         GeminiContent {
             role: Some(Self::convert_role(&role)),
@@ -196,6 +349,8 @@ impl GeminiClient {
                 text: Some(system),
                 thought: None,
                 thought_signature: None,
+                function_call: None,
+                function_response: None,
             }],
         }
     }
@@ -204,6 +359,8 @@ impl GeminiClient {
         let ChatRequest {
             model: _,
             messages,
+            tools,
+            tool_choice,
             max_tokens,
             temperature,
             system,
@@ -213,6 +370,8 @@ impl GeminiClient {
         GeminiRequest {
             contents: messages.into_iter().map(Self::convert_message).collect(),
             system_instruction: system.map(Self::convert_system_instruction),
+            tools: Self::convert_tools(&tools),
+            tool_config: Self::convert_tool_config(tool_choice.as_ref()),
             generation_config: Some(GeminiGenerationConfig {
                 max_output_tokens: max_tokens,
                 temperature,
@@ -230,14 +389,24 @@ impl GeminiClient {
         }
     }
 
-    fn parse_candidate(candidate: &GeminiCandidate) -> (String, ThinkingOutput) {
+    fn parse_candidate(candidate: &GeminiCandidate) -> (String, ThinkingOutput, Vec<ToolCall>) {
         let mut content = String::new();
         let mut thinking = ThinkingOutput::default();
+        let mut tool_calls = Vec::new();
 
         if let Some(candidate_content) = &candidate.content {
             for part in &candidate_content.parts {
                 if let Some(signature) = &part.thought_signature {
                     thinking.signature = Some(signature.clone());
+                }
+
+                if let Some(function_call) = &part.function_call {
+                    tool_calls.push(ToolCall {
+                        id: format!("gemini-call-{}", tool_calls.len()),
+                        name: function_call.name.clone(),
+                        arguments: function_call.args.clone(),
+                    });
+                    continue;
                 }
 
                 let Some(text) = &part.text else {
@@ -255,7 +424,7 @@ impl GeminiClient {
             }
         }
 
-        (content, thinking)
+        (content, thinking, tool_calls)
     }
 
     fn convert_response(
@@ -265,9 +434,9 @@ impl GeminiClient {
         response_debug: Option<String>,
     ) -> ChatResponse {
         let candidate = response.candidates.first();
-        let (content, thinking) = match candidate {
+        let (content, thinking, tool_calls) = match candidate {
             Some(candidate) => Self::parse_candidate(candidate),
-            None => (String::new(), ThinkingOutput::default()),
+            None => (String::new(), ThinkingOutput::default(), Vec::new()),
         };
 
         let thinking = if thinking.is_empty() {
@@ -294,6 +463,7 @@ impl GeminiClient {
                     + usage.thoughts_token_count.unwrap_or(0),
             },
             thinking,
+            tool_calls,
             debug: if request_debug.is_some() || response_debug.is_some() {
                 Some(DebugTrace {
                     request: request_debug,
@@ -453,13 +623,14 @@ impl AiClient for GeminiClient {
                         continue;
                     };
 
-                    let (content, thinking) = GeminiClient::parse_candidate(candidate);
+                    let (content, thinking, tool_calls) = GeminiClient::parse_candidate(candidate);
 
                     if let Some(thinking_text) = thinking.text {
                         yield Ok(StreamChunk {
                             delta: String::new(),
                             thinking_delta: Some(thinking_text),
                             thinking_signature: None,
+                            tool_call_deltas: Vec::new(),
                             done: false,
                             debug: if request_debug.is_some() || response_debug.is_some() {
                                 Some(DebugTrace {
@@ -477,6 +648,34 @@ impl AiClient for GeminiClient {
                             delta: String::new(),
                             thinking_delta: None,
                             thinking_signature: Some(signature),
+                            tool_call_deltas: Vec::new(),
+                            done: false,
+                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                Some(DebugTrace {
+                                    request: request_debug.take(),
+                                    response: response_debug.clone(),
+                                })
+                            } else {
+                                None
+                            },
+                        });
+                    }
+
+                    if !tool_calls.is_empty() {
+                        yield Ok(StreamChunk {
+                            delta: String::new(),
+                            thinking_delta: None,
+                            thinking_signature: None,
+                            tool_call_deltas: tool_calls
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, tool_call)| ToolCallDelta {
+                                    index,
+                                    id: Some(tool_call.id),
+                                    name: Some(tool_call.name),
+                                    arguments: Some(tool_call.arguments.to_string()),
+                                })
+                                .collect(),
                             done: false,
                             debug: if request_debug.is_some() || response_debug.is_some() {
                                 Some(DebugTrace {
@@ -494,6 +693,7 @@ impl AiClient for GeminiClient {
                             delta: content,
                             thinking_delta: None,
                             thinking_signature: None,
+                            tool_call_deltas: Vec::new(),
                             done: false,
                             debug: if request_debug.is_some() || response_debug.is_some() {
                                 Some(DebugTrace {
@@ -511,6 +711,7 @@ impl AiClient for GeminiClient {
                             delta: String::new(),
                             thinking_delta: None,
                             thinking_signature: None,
+                            tool_call_deltas: Vec::new(),
                             done: true,
                             debug: if request_debug.is_some() || response_debug.is_some() {
                                 Some(DebugTrace {
@@ -531,6 +732,7 @@ impl AiClient for GeminiClient {
                 delta: String::new(),
                 thinking_delta: None,
                 thinking_signature: None,
+                tool_call_deltas: Vec::new(),
                 done: true,
                 debug: request_debug.map(|request| DebugTrace {
                     request: Some(request),

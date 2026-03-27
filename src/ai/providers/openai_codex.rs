@@ -7,6 +7,7 @@ pub fn spec() -> ProviderSpec {
         default_model: "gpt-5.1-codex-max",
         supports_thinking_output: true,
         supports_thinking_config: true,
+        supports_tools: false,
         api_style: ApiStyle::OpenAiCodex,
     }
 }

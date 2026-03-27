@@ -26,5 +26,6 @@ pub struct ProviderSpec {
     pub default_model: &'static str,
     pub supports_thinking_output: bool,
     pub supports_thinking_config: bool,
+    pub supports_tools: bool,
     pub api_style: ApiStyle,
 }

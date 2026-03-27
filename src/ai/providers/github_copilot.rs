@@ -7,6 +7,7 @@ pub fn spec() -> ProviderSpec {
         default_model: "claude-sonnet-4.5",
         supports_thinking_output: true,
         supports_thinking_config: true,
+        supports_tools: true,
         api_style: ApiStyle::GitHubCopilot,
     }
 }

@@ -8,6 +8,7 @@
 - provider ごとのデフォルト設定
 - Thinking の取得
 - provider に応じた Thinking 設定の送信
+- Tool Use の定義送信と tool call / tool result の送受信
 
 ## 公開 API
 
@@ -24,6 +25,10 @@
 - `ThinkingConfig`
 - `ThinkingEffort`
 - `ThinkingOutput`
+- `ToolDefinition`
+- `ToolChoice`
+- `ToolCall`
+- `ToolCallDelta`
 
 `src/lib.rs` から再 export されているので、通常は `conect_llm::...` で参照できます。
 
@@ -61,21 +66,16 @@ let client = provider.create_client(AiConfig {
     model: provider.default_model().to_string(),
 });
 
-let request = ChatRequest {
-    model: client.config().model.clone(),
-    messages: vec![
-        Message {
-            role: "user".to_string(),
-            content: "Rust で簡単な HTTP サーバーを書いて".to_string(),
-            thinking: None,
-        }
-    ],
-    max_tokens: Some(2048),
-    temperature: Some(0.7),
-    system: None,
-    thinking: Some(ThinkingConfig::enabled()),
-};
+let mut request = ChatRequest::new(
+    client.config().model.clone(),
+    vec![Message::user("Rust で簡単な HTTP サーバーを書いて")],
+);
+request.max_tokens = Some(2048);
+request.temperature = Some(0.7);
+request.thinking = Some(ThinkingConfig::enabled());
 ```
+
+`Message::user(...)`, `Message::assistant(...)`, `Message::assistant_tool_calls(...)`, `Message::tool_result(...)`, `ChatRequest::new(...)`, `ToolDefinition::function(...)` を用意しているので、通常は field を全部手で埋める必要はありません。
 
 ## Thinking は外からどう見えるか
 
@@ -117,6 +117,103 @@ if let Some(thinking) = &response.thinking {
 - `text`: 人間が読める thinking 本文または要約
 - `signature`: Anthropic 系の署名付き thinking や GitHub Copilot の `reasoning_opaque` に使う値
 - `redacted`: Anthropic 系の `redacted_thinking`
+
+## Tool Use
+
+Tool Use は provider 固有の request shape を隠して、共通の型で扱います。
+
+### 1. tool 定義を送る
+
+```rust
+use conect_llm::{ChatRequest, Message, ToolChoice, ToolDefinition};
+use serde_json::json;
+
+let mut request = ChatRequest::new(
+    "gpt-5.4",
+    vec![Message::user("東京の天気を調べて")],
+);
+request.tools = vec![
+    ToolDefinition::function(
+        "get_weather",
+        Some("都市名から現在の天気を返す".to_string()),
+        json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        }),
+    ),
+];
+request.tool_choice = Some(ToolChoice::Auto);
+```
+
+### 2. LLM からの tool call を受ける
+
+non-stream では `ChatResponse.tool_calls` に入ります。
+
+```rust
+let response = client.chat(request).await?;
+
+for tool_call in &response.tool_calls {
+    println!("tool={} args={}", tool_call.name, tool_call.arguments);
+}
+```
+
+`ToolCall` の意味は次の通りです。
+
+- `id`: provider 側の tool call id
+- `name`: 呼び出す tool 名
+- `arguments`: JSON 引数
+
+stream では `StreamChunk.tool_call_deltas` に差分が入ります。
+
+```rust
+while let Some(chunk) = stream.next().await {
+    let chunk = chunk?;
+
+    for delta in chunk.tool_call_deltas {
+        println!(
+            "tool delta index={} id={:?} name={:?} args={:?}",
+            delta.index, delta.id, delta.name, delta.arguments
+        );
+    }
+}
+```
+
+`ToolCallDelta` の意味は次の通りです。
+
+- `index`: 同一レスポンス内の call 順
+- `id`: call id の差分または確定値
+- `name`: tool 名の差分または確定値
+- `arguments`: 引数 JSON の差分
+
+### 3. tool result を返す
+
+次ターンでは `Message::assistant_tool_calls(...)` と `Message::tool_result(...)` を会話履歴へ戻します。
+
+```rust
+use conect_llm::{Message, ToolCall};
+use serde_json::json;
+
+let tool_call = ToolCall {
+    id: "call_123".to_string(),
+    name: "get_weather".to_string(),
+    arguments: json!({ "city": "東京" }),
+};
+
+let messages = vec![
+    Message::user("東京の天気を調べて"),
+    Message::assistant_tool_calls(vec![tool_call.clone()]),
+    Message::tool_result(
+        tool_call.id.clone(),
+        tool_call.name.clone(),
+        json!({ "temperature_c": 22, "condition": "sunny" }),
+    ),
+];
+```
+
+tool result は `tool_result: serde_json::Value` として保持します。OpenAI 互換系では文字列化し、Anthropic / Gemini では provider native の tool result block へ変換します。
 
 ### 2. ストリームとして取得する
 
@@ -162,6 +259,7 @@ while let Some(chunk) = stream.next().await {
 - `delta`: 通常の本文差分
 - `thinking_delta`: Thinking の差分
 - `thinking_signature`: Thinking に紐づく署名差分
+- `tool_call_deltas`: Tool call の差分
 - `done`: ストリーム完了
 - `debug`: debug flag 有効時の raw request / raw event
 
@@ -170,11 +268,9 @@ while let Some(chunk) = stream.next().await {
 Thinking を会話履歴として保持したい場合は、`Message.thinking` にそのまま入れて次の `ChatRequest.messages` へ戻します。
 
 ```rust
-let assistant_message = Message {
-    role: "assistant".to_string(),
-    content: response.content.clone(),
-    thinking: response.thinking.clone(),
-};
+let mut assistant_message = Message::assistant(response.content.clone());
+assistant_message.thinking = response.thinking.clone();
+assistant_message.tool_calls = response.tool_calls.clone();
 ```
 
 この形にしておくと、Anthropic 系では `signature` や `redacted` を含む形で再送できます。OpenAI 互換系では `thinking.text` が `reasoning_content` として使われる想定ですが、provider によっては Sakura のように `reasoning` フィールドで返す実装もあるため、このライブラリ側で吸収しています。
@@ -223,19 +319,19 @@ let thinking = ThinkingConfig {
 
 ## Provider 一覧
 
-| Provider | API style | Thinking 出力 | Thinking 設定 |
-| --- | --- | --- | --- |
-| `AiProvider::Anthropic` | Anthropic | Yes | Yes |
-| `AiProvider::GitHubCopilot` | OpenAI-compatible (Copilot) | Yes | Yes |
-| `AiProvider::GoogleAiStudio` | OpenAI-compatible | No | Yes |
-| `AiProvider::Gemini` | Gemini native | Yes | Yes |
-| `AiProvider::OpenAi` | OpenAI-compatible | No | No |
-| `AiProvider::OpenAiCodex` | ChatGPT Codex backend | Yes | Yes |
-| `AiProvider::Sakura` | OpenAI-compatible | Yes | No |
-| `AiProvider::Kimi` | OpenAI-compatible | Yes | Yes |
-| `AiProvider::KimiCoding` | Anthropic | Yes | Yes |
-| `AiProvider::ZAi` | OpenAI-compatible | Yes | Yes |
-| `AiProvider::ZAiCoding` | OpenAI-compatible | Yes | Yes |
+| Provider | API style | Thinking 出力 | Thinking 設定 | Tool Use |
+| --- | --- | --- | --- | --- |
+| `AiProvider::Anthropic` | Anthropic | Yes | Yes | Yes |
+| `AiProvider::GitHubCopilot` | OpenAI-compatible (Copilot) | Yes | Yes | Yes |
+| `AiProvider::GoogleAiStudio` | OpenAI-compatible | No | Yes | Yes |
+| `AiProvider::Gemini` | Gemini native | Yes | Yes | Yes |
+| `AiProvider::OpenAi` | OpenAI-compatible | No | No | Yes |
+| `AiProvider::OpenAiCodex` | ChatGPT Codex backend | Yes | Yes | No |
+| `AiProvider::Sakura` | OpenAI-compatible | Yes | No | Yes |
+| `AiProvider::Kimi` | OpenAI-compatible | Yes | Yes | Yes |
+| `AiProvider::KimiCoding` | Anthropic | Yes | Yes | Yes |
+| `AiProvider::ZAi` | OpenAI-compatible | Yes | Yes | Yes |
+| `AiProvider::ZAiCoding` | OpenAI-compatible | Yes | Yes | Yes |
 
 各 provider からは以下も取得できます。
 
@@ -244,6 +340,7 @@ let thinking = ThinkingConfig {
 - `default_model()`
 - `supports_thinking_output()`
 - `supports_thinking_config()`
+- `supports_tools()`
 
 ```rust
 let provider = AiProvider::Sakura;
@@ -253,6 +350,7 @@ println!("{}", provider.default_base_url());
 println!("{}", provider.default_model());
 println!("{}", provider.supports_thinking_output());
 println!("{}", provider.supports_thinking_config());
+println!("{}", provider.supports_tools());
 ```
 
 ## 注意点
@@ -266,6 +364,7 @@ println!("{}", provider.supports_thinking_config());
 - `AiProvider::GitHubCopilot` は `ChatRequest.thinking.effort` を `reasoning_effort` として、`budget_tokens` を `thinking_budget` として送ります。
 - `AiProvider::OpenAi` は現状 `chat.completions` ベースです。Thinking は公開 capability としては `false` 扱いです。
 - `AiProvider::OpenAiCodex` は `https://chatgpt.com/backend-api/codex/responses` を使います。
+- `AiProvider::OpenAiCodex` の Tool Use はまだ未実装です。`ChatRequest.tools` や tool result を渡すとエラーを返します。
 - `AiProvider::OpenAiCodex` の `api_key` は通常の OpenAI API key ではなく、ChatGPT OAuth の access token として扱います。
 - `AiProvider::OpenAiCodex` では `api_key` を空にすると `CODEX_HOME/auth.json` または `~/.codex/auth.json` から access token / refresh token を読みます。
 - `AiProvider::OpenAiCodex` は access token の期限が近い場合、`refresh_token` を使って `auth.openai.com/oauth/token` で更新し、`auth.json` へ書き戻します。
@@ -347,18 +446,12 @@ let client = provider.create_client(AiConfig {
     model: "gpt-5.1-codex-mini".to_string(),
 });
 
-let request = ChatRequest {
-    model: "gpt-5.1-codex-max".to_string(),
-    messages: vec![Message {
-        role: "user".to_string(),
-        content: "この変更方針で進めて".to_string(),
-        thinking: None,
-    }],
-    max_tokens: Some(8192),
-    temperature: None,
-    system: None,
-    thinking: Some(ThinkingConfig::enabled_with_effort(ThinkingEffort::XHigh)),
-};
+let mut request = ChatRequest::new(
+    "gpt-5.1-codex-max",
+    vec![Message::user("この変更方針で進めて")],
+);
+request.max_tokens = Some(8192);
+request.thinking = Some(ThinkingConfig::enabled_with_effort(ThinkingEffort::XHigh));
 ```
 
 Codex ではこの `thinking.effort` を `reasoning.effort` として送ります。thinking の ON/OFF 自体は `ThinkingConfig::enabled()` / `ThinkingConfig::disabled()` で切り替え、Codex の強さだけ変えたいときに `effort` を足す形です。モデルは `AiConfig.model` と `ChatRequest.model` のどちらでも指定できますが、実際に送信されるのは `ChatRequest.model` です。

@@ -2,16 +2,22 @@
 
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    ThinkingConfig, ThinkingOutput, Usage, capture_debug_json, capture_debug_text,
+    ThinkingConfig, ThinkingOutput, ToolCall, ToolCallDelta, ToolChoice, ToolDefinition, Usage,
+    capture_debug_json, capture_debug_text, parse_tool_arguments, serialize_tool_arguments,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Serialize)]
 struct OpenAiRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAiToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,9 +32,43 @@ struct OpenAiRequest {
 #[derive(Debug, Clone, Serialize)]
 struct OpenAiMessage {
     role: String,
-    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiToolDefinition {
+    #[serde(rename = "type")]
+    tool_type: &'static str,
+    function: OpenAiFunctionDefinition,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiFunctionDefinition {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAiToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: OpenAiToolFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAiToolFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,11 +114,14 @@ struct OpenAiChoice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiMessageResponse {
     role: String,
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,8 +155,27 @@ struct OpenAiDelta {
     #[serde(default)]
     reasoning: Option<String>,
     #[serde(default)]
+    tool_calls: Option<Vec<OpenAiToolCallDelta>>,
+    #[serde(default)]
     #[allow(dead_code)]
     role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAiToolCallDelta {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAiToolFunctionDelta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAiToolFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,10 +334,94 @@ impl OpenAiClient {
         })
     }
 
+    fn convert_tools(tools: &[ToolDefinition]) -> Option<Vec<OpenAiToolDefinition>> {
+        if tools.is_empty() {
+            return None;
+        }
+
+        Some(
+            tools
+                .iter()
+                .map(|tool| OpenAiToolDefinition {
+                    tool_type: "function",
+                    function: OpenAiFunctionDefinition {
+                        name: tool.name.clone(),
+                        description: tool.description.clone(),
+                        parameters: tool.input_schema.clone(),
+                    },
+                })
+                .collect(),
+        )
+    }
+
+    fn convert_tool_choice(choice: Option<&ToolChoice>) -> Option<Value> {
+        match choice? {
+            ToolChoice::Auto => Some(json!("auto")),
+            ToolChoice::None => Some(json!("none")),
+            ToolChoice::Required => Some(json!("required")),
+            ToolChoice::Tool(name) => Some(json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                }
+            })),
+        }
+    }
+
+    fn convert_tool_calls(tool_calls: Vec<ToolCall>) -> Option<Vec<OpenAiToolCall>> {
+        if tool_calls.is_empty() {
+            return None;
+        }
+
+        Some(
+            tool_calls
+                .into_iter()
+                .map(|tool_call| OpenAiToolCall {
+                    id: tool_call.id,
+                    call_type: "function".to_string(),
+                    function: OpenAiToolFunction {
+                        name: tool_call.name,
+                        arguments: serialize_tool_arguments(&tool_call.arguments),
+                    },
+                })
+                .collect(),
+        )
+    }
+
+    fn parse_tool_calls(tool_calls: Option<Vec<OpenAiToolCall>>) -> Vec<ToolCall> {
+        tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tool_call| ToolCall {
+                id: tool_call.id,
+                name: tool_call.function.name,
+                arguments: parse_tool_arguments(&tool_call.function.arguments),
+            })
+            .collect()
+    }
+
+    fn parse_tool_call_deltas(tool_calls: Option<Vec<OpenAiToolCallDelta>>) -> Vec<ToolCallDelta> {
+        tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tool_call| ToolCallDelta {
+                index: tool_call.index,
+                id: tool_call.id,
+                name: tool_call
+                    .function
+                    .as_ref()
+                    .and_then(|function| function.name.clone()),
+                arguments: tool_call.function.and_then(|function| function.arguments),
+            })
+            .collect()
+    }
+
     fn convert_request(request: ChatRequest, base_url: &str, stream: bool) -> OpenAiRequest {
         let ChatRequest {
             model,
             messages: request_messages,
+            tools,
+            tool_choice,
             max_tokens,
             temperature,
             system,
@@ -287,8 +433,10 @@ impl OpenAiClient {
         if let Some(system) = system {
             messages.push(OpenAiMessage {
                 role: "system".to_string(),
-                content: system,
+                content: Some(system),
                 reasoning_content: None,
+                tool_call_id: None,
+                tool_calls: None,
             });
         }
 
@@ -297,18 +445,31 @@ impl OpenAiClient {
                 role,
                 content,
                 thinking,
+                tool_calls,
+                tool_call_id,
+                tool_name: _,
+                tool_result: _,
+                tool_error: _,
             } = message;
             let reasoning_content = thinking.and_then(|thinking| thinking.text);
             messages.push(OpenAiMessage {
                 role,
-                content,
+                content: if content.is_empty() && !tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(content)
+                },
                 reasoning_content,
+                tool_call_id,
+                tool_calls: Self::convert_tool_calls(tool_calls),
             });
         }
 
         OpenAiRequest {
             model,
             messages,
+            tools: Self::convert_tools(&tools),
+            tool_choice: Self::convert_tool_choice(tool_choice.as_ref()),
             max_tokens,
             temperature,
             thinking: Self::convert_thinking_config(base_url, thinking.as_ref()),
@@ -322,6 +483,11 @@ impl OpenAiClient {
         request_debug: Option<String>,
         response_debug: Option<String>,
     ) -> ChatResponse {
+        let tool_calls = response
+            .choices
+            .first()
+            .map(|choice| Self::parse_tool_calls(choice.message.tool_calls.clone()))
+            .unwrap_or_default();
         let thinking = response
             .choices
             .first()
@@ -342,7 +508,7 @@ impl OpenAiClient {
             .choices
             .into_iter()
             .next()
-            .map(|choice| choice.message.content)
+            .and_then(|choice| choice.message.content)
             .unwrap_or_default();
 
         ChatResponse {
@@ -354,6 +520,7 @@ impl OpenAiClient {
                 output_tokens: response.usage.completion_tokens,
             },
             thinking,
+            tool_calls,
             debug: if request_debug.is_some() || response_debug.is_some() {
                 Some(DebugTrace {
                     request: request_debug,
@@ -489,6 +656,7 @@ impl AiClient for OpenAiClient {
                             delta: String::new(),
                             thinking_delta: None,
                             thinking_signature: None,
+                            tool_call_deltas: Vec::new(),
                             done: true,
                             debug: if request_debug.is_some() || response_debug.is_some() {
                                 Some(DebugTrace {
@@ -514,12 +682,15 @@ impl AiClient for OpenAiClient {
                             .reasoning_content
                             .clone()
                             .or_else(|| choice.delta.reasoning.clone());
+                        let tool_call_deltas =
+                            OpenAiClient::parse_tool_call_deltas(choice.delta.tool_calls.clone());
                         let done = choice.finish_reason.is_some();
 
                         yield Ok(StreamChunk {
                             delta,
                             thinking_delta,
                             thinking_signature: None,
+                            tool_call_deltas,
                             done,
                             debug: if request_debug.is_some() || response_debug.is_some() {
                                 Some(DebugTrace {
@@ -542,6 +713,7 @@ impl AiClient for OpenAiClient {
                 delta: String::new(),
                 thinking_delta: None,
                 thinking_signature: None,
+                tool_call_deltas: Vec::new(),
                 done: true,
                 debug: request_debug.map(|request| DebugTrace {
                     request: Some(request),
@@ -612,4 +784,87 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, A
         serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
 
     Ok(models.data.into_iter().map(|model| model.id).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        OpenAiClient, OpenAiMessageResponse, OpenAiResponse, OpenAiToolCall, OpenAiToolFunction,
+        OpenAiUsage,
+    };
+    use crate::ai::{ChatRequest, Message, ToolCall, ToolChoice, ToolDefinition};
+    use serde_json::json;
+
+    #[test]
+    fn convert_request_includes_tools_and_tool_results() {
+        let mut request = ChatRequest::new(
+            "gpt-5.4",
+            vec![
+                Message::assistant_tool_calls(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: json!({"city": "Tokyo"}),
+                }]),
+                Message::tool_result("call_1", "get_weather", json!({"temperature_c": 22})),
+            ],
+        );
+        request.tools = vec![ToolDefinition::function(
+            "get_weather",
+            Some("Return weather".to_string()),
+            json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "required": ["city"]
+            }),
+        )];
+        request.tool_choice = Some(ToolChoice::Auto);
+
+        let converted = OpenAiClient::convert_request(request, "https://api.openai.com", false);
+        assert_eq!(converted.tools.as_ref().map(Vec::len), Some(1));
+        assert_eq!(converted.tool_choice, Some(json!("auto")));
+        assert_eq!(
+            converted.messages[0].tool_calls.as_ref().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            converted.messages[1].tool_call_id.as_deref(),
+            Some("call_1")
+        );
+    }
+
+    #[test]
+    fn convert_response_parses_tool_calls() {
+        let response = OpenAiResponse {
+            id: "resp_1".to_string(),
+            choices: vec![super::OpenAiChoice {
+                message: OpenAiMessageResponse {
+                    role: "assistant".to_string(),
+                    content: Some(String::new()),
+                    reasoning_content: None,
+                    reasoning: None,
+                    tool_calls: Some(vec![OpenAiToolCall {
+                        id: "call_1".to_string(),
+                        call_type: "function".to_string(),
+                        function: OpenAiToolFunction {
+                            name: "get_weather".to_string(),
+                            arguments: "{\"city\":\"Tokyo\"}".to_string(),
+                        },
+                    }]),
+                },
+                finish_reason: "tool_calls".to_string(),
+            }],
+            model: "gpt-5.4".to_string(),
+            usage: OpenAiUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+            },
+        };
+
+        let converted = OpenAiClient::convert_response(response, None, None);
+        assert_eq!(converted.tool_calls.len(), 1);
+        assert_eq!(converted.tool_calls[0].name, "get_weather");
+        assert_eq!(converted.tool_calls[0].arguments, json!({"city": "Tokyo"}));
+    }
 }

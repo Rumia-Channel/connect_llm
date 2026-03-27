@@ -957,10 +957,24 @@ impl OpenAiCodexClient {
         "You are a helpful assistant.".to_string()
     }
 
+    fn uses_tool_features(request: &ChatRequest) -> bool {
+        !request.tools.is_empty()
+            || request.tool_choice.is_some()
+            || request.messages.iter().any(|message| {
+                !message.tool_calls.is_empty()
+                    || message.tool_call_id.is_some()
+                    || message.tool_name.is_some()
+                    || message.tool_result.is_some()
+                    || message.tool_error.is_some()
+            })
+    }
+
     fn convert_request(request: ChatRequest, stream: bool) -> OpenAiCodexRequest {
         let ChatRequest {
             model,
             messages: request_messages,
+            tools: _,
+            tool_choice: _,
             max_tokens: _,
             temperature,
             system,
@@ -974,6 +988,11 @@ impl OpenAiCodexClient {
                 role,
                 content,
                 thinking: _,
+                tool_calls: _,
+                tool_call_id: _,
+                tool_name: _,
+                tool_result: _,
+                tool_error: _,
             } = message;
             let content_type = if role == "assistant" {
                 "output_text"
@@ -1048,6 +1067,7 @@ impl OpenAiCodexClient {
                 output_tokens: usage.output_tokens,
             },
             thinking: Self::extract_thinking_from_output(&response.output),
+            tool_calls: Vec::new(),
             debug: if request_debug.is_some() || response_debug.is_some() {
                 Some(DebugTrace {
                     request: request_debug,
@@ -1144,6 +1164,11 @@ fn percent_encode_component(input: &str) -> String {
 #[async_trait::async_trait]
 impl AiClient for OpenAiCodexClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
+        if Self::uses_tool_features(&request) {
+            return Err(AiError::Api(
+                "OpenAI Codex tool use is not implemented in this library yet.".to_string(),
+            ));
+        }
         let auth = self.resolve_auth().await?;
         let url = Self::endpoint_url(&self.config.base_url);
         let request = Self::convert_request(request, true);
@@ -1239,6 +1264,14 @@ impl AiClient for OpenAiCodexClient {
         &self,
         request: ChatRequest,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
+        if Self::uses_tool_features(&request) {
+            let stream = async_stream::stream! {
+                yield Err(AiError::Api(
+                    "OpenAI Codex tool use is not implemented in this library yet.".to_string(),
+                ));
+            };
+            return futures_util::StreamExt::boxed(stream);
+        }
         let client = self.client.clone();
         let config = self.config.clone();
         let request = Self::convert_request(request, true);
@@ -1325,6 +1358,7 @@ impl AiClient for OpenAiCodexClient {
                             delta: String::new(),
                             thinking_delta: None,
                             thinking_signature: None,
+                            tool_call_deltas: Vec::new(),
                             done: true,
                             debug: if request_debug.is_some() || response_debug.is_some() {
                                 Some(DebugTrace {
@@ -1353,6 +1387,7 @@ impl AiClient for OpenAiCodexClient {
                                 delta,
                                 thinking_delta: None,
                                 thinking_signature: None,
+                                tool_call_deltas: Vec::new(),
                                 done: false,
                                 debug: if request_debug.is_some() || response_debug.is_some() {
                                     Some(DebugTrace {
@@ -1373,6 +1408,7 @@ impl AiClient for OpenAiCodexClient {
                                 delta: String::new(),
                                 thinking_delta,
                                 thinking_signature: None,
+                                tool_call_deltas: Vec::new(),
                                 done: false,
                                 debug: if request_debug.is_some() || response_debug.is_some() {
                                     Some(DebugTrace {
@@ -1389,6 +1425,7 @@ impl AiClient for OpenAiCodexClient {
                                 delta: String::new(),
                                 thinking_delta: None,
                                 thinking_signature: None,
+                                tool_call_deltas: Vec::new(),
                                 done: true,
                                 debug: if request_debug.is_some() || response_debug.is_some() {
                                     Some(DebugTrace {
@@ -1410,6 +1447,7 @@ impl AiClient for OpenAiCodexClient {
                 delta: String::new(),
                 thinking_delta: None,
                 thinking_signature: None,
+                tool_call_deltas: Vec::new(),
                 done: true,
                 debug: request_debug.map(|request| DebugTrace {
                     request: Some(request),
@@ -1459,7 +1497,14 @@ mod tests {
                 role: "user".to_string(),
                 content: "hello".to_string(),
                 thinking: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: None,
+                tool_result: None,
+                tool_error: None,
             }],
+            tools: Vec::new(),
+            tool_choice: None,
             max_tokens: None,
             temperature: None,
             system: None,
@@ -1481,7 +1526,14 @@ mod tests {
                 role: "user".to_string(),
                 content: "hello".to_string(),
                 thinking: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: None,
+                tool_result: None,
+                tool_error: None,
             }],
+            tools: Vec::new(),
+            tool_choice: None,
             max_tokens: None,
             temperature: None,
             system: None,

@@ -2,11 +2,13 @@
 
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    ThinkingEffort, ThinkingOutput, Usage, capture_debug_json, capture_debug_text,
+    ThinkingEffort, ThinkingOutput, ToolCall, ToolCallDelta, ToolChoice, ToolDefinition, Usage,
+    capture_debug_json, capture_debug_text, parse_tool_arguments, serialize_tool_arguments,
 };
 use futures_util::StreamExt;
 use reqwest::{Client, blocking::Client as BlockingClient};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -69,6 +71,10 @@ struct GitHubCopilotRequest {
     model: String,
     messages: Vec<GitHubCopilotMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<GitHubCopilotToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -88,6 +94,39 @@ struct GitHubCopilotMessage {
     reasoning_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_opaque: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<GitHubCopilotToolCall>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GitHubCopilotToolDefinition {
+    #[serde(rename = "type")]
+    tool_type: &'static str,
+    function: GitHubCopilotFunctionDefinition,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GitHubCopilotFunctionDefinition {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GitHubCopilotToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: GitHubCopilotToolFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GitHubCopilotToolFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +153,8 @@ struct GitHubCopilotMessageResponse {
     reasoning_text: Option<String>,
     #[serde(default)]
     reasoning_opaque: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<GitHubCopilotToolCall>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -148,6 +189,25 @@ struct GitHubCopilotDelta {
     reasoning_text: Option<String>,
     #[serde(default)]
     reasoning_opaque: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<GitHubCopilotToolCallDelta>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GitHubCopilotToolCallDelta {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<GitHubCopilotToolFunctionDelta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GitHubCopilotToolFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -572,10 +632,96 @@ impl GitHubCopilotClient {
         }
     }
 
+    fn convert_tools(tools: &[ToolDefinition]) -> Option<Vec<GitHubCopilotToolDefinition>> {
+        if tools.is_empty() {
+            return None;
+        }
+
+        Some(
+            tools
+                .iter()
+                .map(|tool| GitHubCopilotToolDefinition {
+                    tool_type: "function",
+                    function: GitHubCopilotFunctionDefinition {
+                        name: tool.name.clone(),
+                        description: tool.description.clone(),
+                        parameters: tool.input_schema.clone(),
+                    },
+                })
+                .collect(),
+        )
+    }
+
+    fn convert_tool_choice(choice: Option<&ToolChoice>) -> Option<Value> {
+        match choice? {
+            ToolChoice::Auto => Some(json!("auto")),
+            ToolChoice::None => Some(json!("none")),
+            ToolChoice::Required => Some(json!("required")),
+            ToolChoice::Tool(name) => Some(json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                }
+            })),
+        }
+    }
+
+    fn convert_tool_calls(tool_calls: Vec<ToolCall>) -> Option<Vec<GitHubCopilotToolCall>> {
+        if tool_calls.is_empty() {
+            return None;
+        }
+
+        Some(
+            tool_calls
+                .into_iter()
+                .map(|tool_call| GitHubCopilotToolCall {
+                    id: tool_call.id,
+                    call_type: "function".to_string(),
+                    function: GitHubCopilotToolFunction {
+                        name: tool_call.name,
+                        arguments: serialize_tool_arguments(&tool_call.arguments),
+                    },
+                })
+                .collect(),
+        )
+    }
+
+    fn parse_tool_calls(tool_calls: Option<Vec<GitHubCopilotToolCall>>) -> Vec<ToolCall> {
+        tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tool_call| ToolCall {
+                id: tool_call.id,
+                name: tool_call.function.name,
+                arguments: parse_tool_arguments(&tool_call.function.arguments),
+            })
+            .collect()
+    }
+
+    fn parse_tool_call_deltas(
+        tool_calls: Option<Vec<GitHubCopilotToolCallDelta>>,
+    ) -> Vec<ToolCallDelta> {
+        tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tool_call| ToolCallDelta {
+                index: tool_call.index,
+                id: tool_call.id,
+                name: tool_call
+                    .function
+                    .as_ref()
+                    .and_then(|function| function.name.clone()),
+                arguments: tool_call.function.and_then(|function| function.arguments),
+            })
+            .collect()
+    }
+
     fn convert_request(request: ChatRequest, stream: bool) -> GitHubCopilotRequest {
         let ChatRequest {
             model,
             messages: request_messages,
+            tools,
+            tool_choice,
             max_tokens,
             temperature,
             system,
@@ -590,6 +736,8 @@ impl GitHubCopilotClient {
                 content: Some(system),
                 reasoning_text: None,
                 reasoning_opaque: None,
+                tool_call_id: None,
+                tool_calls: None,
             });
         }
 
@@ -598,6 +746,11 @@ impl GitHubCopilotClient {
                 role,
                 content,
                 thinking,
+                tool_calls,
+                tool_call_id,
+                tool_name: _,
+                tool_result: _,
+                tool_error: _,
             } = message;
 
             let (reasoning_text, reasoning_opaque) = match thinking {
@@ -616,6 +769,8 @@ impl GitHubCopilotClient {
                 content,
                 reasoning_text,
                 reasoning_opaque,
+                tool_call_id,
+                tool_calls: Self::convert_tool_calls(tool_calls),
             });
         }
 
@@ -631,6 +786,8 @@ impl GitHubCopilotClient {
         GitHubCopilotRequest {
             model,
             messages,
+            tools: Self::convert_tools(&tools),
+            tool_choice: Self::convert_tool_choice(tool_choice.as_ref()),
             max_tokens,
             temperature,
             reasoning_effort,
@@ -656,6 +813,9 @@ impl GitHubCopilotClient {
             };
             (!thinking.is_empty()).then_some(thinking)
         });
+        let tool_calls = message
+            .map(|message| Self::parse_tool_calls(message.tool_calls.clone()))
+            .unwrap_or_default();
         let usage = response.usage.unwrap_or_default();
 
         ChatResponse {
@@ -667,6 +827,7 @@ impl GitHubCopilotClient {
                 output_tokens: usage.completion_tokens,
             },
             thinking,
+            tool_calls,
             debug: if request_debug.is_some() || response_debug.is_some() {
                 Some(DebugTrace {
                     request: request_debug,
@@ -925,6 +1086,7 @@ impl AiClient for GitHubCopilotClient {
                             delta: String::new(),
                             thinking_delta: None,
                             thinking_signature: None,
+                            tool_call_deltas: Vec::new(),
                             done: true,
                             debug: if request_debug.is_some() || response_debug.is_some() {
                                 Some(DebugTrace {
@@ -948,12 +1110,16 @@ impl AiClient for GitHubCopilotClient {
                         let delta = choice.delta.content.clone().unwrap_or_default();
                         let thinking_delta = choice.delta.reasoning_text.clone();
                         let thinking_signature = choice.delta.reasoning_opaque.clone();
+                        let tool_call_deltas = GitHubCopilotClient::parse_tool_call_deltas(
+                            choice.delta.tool_calls.clone(),
+                        );
                         let done = choice.finish_reason.is_some();
 
                         yield Ok(StreamChunk {
                             delta,
                             thinking_delta,
                             thinking_signature,
+                            tool_call_deltas,
                             done,
                             debug: if request_debug.is_some() || response_debug.is_some() {
                                 Some(DebugTrace {
@@ -976,6 +1142,7 @@ impl AiClient for GitHubCopilotClient {
                 delta: String::new(),
                 thinking_delta: None,
                 thinking_signature: None,
+                tool_call_deltas: Vec::new(),
                 done: true,
                 debug: request_debug.map(|request| DebugTrace {
                     request: Some(request),
@@ -1073,7 +1240,14 @@ mod tests {
                     signature: Some("opaque".to_string()),
                     redacted: None,
                 }),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: None,
+                tool_result: None,
+                tool_error: None,
             }],
+            tools: Vec::new(),
+            tool_choice: None,
             max_tokens: Some(256),
             temperature: None,
             system: None,

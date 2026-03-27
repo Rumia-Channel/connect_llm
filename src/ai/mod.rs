@@ -18,6 +18,7 @@ pub use openai_codex::{
 };
 use providers::{ApiStyle, ProviderSpec};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -68,6 +69,74 @@ pub struct Message {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_error: Option<bool>,
+}
+
+impl Message {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: content.into(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result: None,
+            tool_error: None,
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: content.into(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result: None,
+            tool_error: None,
+        }
+    }
+
+    pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: String::new(),
+            thinking: None,
+            tool_calls,
+            tool_call_id: None,
+            tool_name: None,
+            tool_result: None,
+            tool_error: None,
+        }
+    }
+
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        tool_result: Value,
+    ) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: String::new(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+            tool_name: Some(tool_name.into()),
+            tool_result: Some(tool_result),
+            tool_error: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +144,7 @@ pub struct StreamChunk {
     pub delta: String,
     pub thinking_delta: Option<String>,
     pub thinking_signature: Option<String>,
+    pub tool_call_deltas: Vec<ToolCallDelta>,
     pub done: bool,
     pub debug: Option<DebugTrace>,
 }
@@ -83,6 +153,10 @@ pub struct StreamChunk {
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDefinition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,6 +167,21 @@ pub struct ChatRequest {
     pub thinking: Option<ThinkingConfig>,
 }
 
+impl ChatRequest {
+    pub fn new(model: impl Into<String>, messages: Vec<Message>) -> Self {
+        Self {
+            model: model.into(),
+            messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: None,
+            temperature: None,
+            system: None,
+            thinking: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub id: String,
@@ -101,6 +190,8 @@ pub struct ChatResponse {
     pub usage: Usage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debug: Option<DebugTrace>,
 }
@@ -119,6 +210,62 @@ pub struct DebugTrace {
     pub response: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default = "empty_object")]
+    pub input_schema: Value,
+}
+
+impl ToolDefinition {
+    pub fn function(
+        name: impl Into<String>,
+        description: impl Into<Option<String>>,
+        input_schema: Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallDelta {
+    pub index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    Auto,
+    None,
+    Required,
+    Tool(String),
+}
+
+impl ToolChoice {
+    pub fn tool(name: impl Into<String>) -> Self {
+        Self::Tool(name.into())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThinkingOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,6 +274,28 @@ pub struct ThinkingOutput {
     pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redacted: Option<String>,
+}
+
+fn empty_object() -> Value {
+    Value::Object(serde_json::Map::new())
+}
+
+pub(crate) fn parse_tool_arguments(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+}
+
+pub(crate) fn serialize_tool_arguments(arguments: &Value) -> String {
+    match arguments {
+        Value::String(value) => value.clone(),
+        _ => serde_json::to_string(arguments).unwrap_or_else(|_| arguments.to_string()),
+    }
+}
+
+pub(crate) fn message_tool_result_value(message: &Message) -> Value {
+    message
+        .tool_result
+        .clone()
+        .unwrap_or_else(|| Value::String(message.content.clone()))
 }
 
 impl ThinkingOutput {
@@ -348,5 +517,9 @@ impl AiProvider {
 
     pub fn supports_thinking_config(&self) -> bool {
         self.spec().supports_thinking_config
+    }
+
+    pub fn supports_tools(&self) -> bool {
+        self.spec().supports_tools
     }
 }

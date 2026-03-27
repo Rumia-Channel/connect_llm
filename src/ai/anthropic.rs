@@ -2,16 +2,22 @@
 
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    ThinkingConfig, ThinkingDisplay, ThinkingOutput, Usage, capture_debug_json, capture_debug_text,
+    ThinkingConfig, ThinkingDisplay, ThinkingOutput, ToolCall, ToolCallDelta, ToolChoice,
+    ToolDefinition, Usage, capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize)]
 struct AnthropicRequest {
     model: String,
     messages: Vec<AnthropicRequestMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<AnthropicToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<AnthropicToolChoice>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
@@ -41,6 +47,34 @@ struct AnthropicRequestContentBlock {
     signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_use_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_error: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnthropicToolDefinition {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    input_schema: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnthropicToolChoice {
+    #[serde(rename = "type")]
+    choice_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,6 +107,18 @@ struct AnthropicContent {
     signature: Option<String>,
     #[serde(default)]
     data: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    input: Option<Value>,
+    #[serde(default)]
+    tool_use_id: Option<String>,
+    #[serde(default)]
+    content: Option<Value>,
+    #[serde(default)]
+    is_error: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +127,10 @@ struct AnthropicStreamResponse {
     event_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     delta: Option<AnthropicDelta>,
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_block: Option<AnthropicContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<AnthropicStreamMessage>,
 }
@@ -95,6 +145,8 @@ struct AnthropicDelta {
     thinking: Option<String>,
     #[serde(default)]
     signature: Option<String>,
+    #[serde(default)]
+    partial_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_reason: Option<String>,
 }
@@ -142,12 +194,74 @@ impl AnthropicClient {
         }
     }
 
+    fn convert_tools(tools: &[ToolDefinition]) -> Option<Vec<AnthropicToolDefinition>> {
+        if tools.is_empty() {
+            return None;
+        }
+
+        Some(
+            tools
+                .iter()
+                .map(|tool| AnthropicToolDefinition {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                })
+                .collect(),
+        )
+    }
+
+    fn convert_tool_choice(choice: Option<&ToolChoice>) -> Option<AnthropicToolChoice> {
+        match choice? {
+            ToolChoice::Auto => Some(AnthropicToolChoice {
+                choice_type: "auto",
+                name: None,
+            }),
+            ToolChoice::None => Some(AnthropicToolChoice {
+                choice_type: "none",
+                name: None,
+            }),
+            ToolChoice::Required => Some(AnthropicToolChoice {
+                choice_type: "any",
+                name: None,
+            }),
+            ToolChoice::Tool(name) => Some(AnthropicToolChoice {
+                choice_type: "tool",
+                name: Some(name.clone()),
+            }),
+        }
+    }
+
     fn convert_request_message(message: super::Message) -> AnthropicRequestMessage {
         let super::Message {
             role,
             content,
             thinking,
+            tool_calls,
+            tool_call_id,
+            tool_name,
+            tool_result,
+            tool_error,
         } = message;
+
+        if role == "tool" {
+            return AnthropicRequestMessage {
+                role: "user".to_string(),
+                content: vec![AnthropicRequestContentBlock {
+                    content_type: "tool_result".to_string(),
+                    text: None,
+                    thinking: None,
+                    signature: None,
+                    data: None,
+                    id: None,
+                    name: tool_name,
+                    input: None,
+                    tool_use_id: tool_call_id,
+                    content: Some(tool_result.unwrap_or_else(|| Value::String(content))),
+                    is_error: tool_error,
+                }],
+            };
+        }
 
         let mut blocks = Vec::new();
 
@@ -159,6 +273,12 @@ impl AnthropicClient {
                     thinking: Some(thinking.text.unwrap_or_default()),
                     signature: thinking.signature,
                     data: None,
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
                 });
             }
 
@@ -169,17 +289,47 @@ impl AnthropicClient {
                     thinking: None,
                     signature: None,
                     data: Some(redacted),
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
                 });
             }
         }
 
-        blocks.push(AnthropicRequestContentBlock {
-            content_type: "text".to_string(),
-            text: Some(content),
-            thinking: None,
-            signature: None,
-            data: None,
-        });
+        for tool_call in tool_calls {
+            blocks.push(AnthropicRequestContentBlock {
+                content_type: "tool_use".to_string(),
+                text: None,
+                thinking: None,
+                signature: None,
+                data: None,
+                id: Some(tool_call.id),
+                name: Some(tool_call.name),
+                input: Some(tool_call.arguments),
+                tool_use_id: None,
+                content: None,
+                is_error: None,
+            });
+        }
+
+        if !content.is_empty() {
+            blocks.push(AnthropicRequestContentBlock {
+                content_type: "text".to_string(),
+                text: Some(content),
+                thinking: None,
+                signature: None,
+                data: None,
+                id: None,
+                name: None,
+                input: None,
+                tool_use_id: None,
+                content: None,
+                is_error: None,
+            });
+        }
 
         AnthropicRequestMessage {
             role,
@@ -210,6 +360,8 @@ impl AnthropicClient {
         let ChatRequest {
             model,
             messages,
+            tools,
+            tool_choice,
             max_tokens,
             temperature,
             system,
@@ -224,6 +376,8 @@ impl AnthropicClient {
         AnthropicRequest {
             model,
             messages,
+            tools: Self::convert_tools(&tools),
+            tool_choice: Self::convert_tool_choice(tool_choice.as_ref()),
             max_tokens: max_tokens.unwrap_or(4096),
             system,
             temperature,
@@ -246,6 +400,7 @@ impl AnthropicClient {
             .join("");
 
         let mut thinking_output = ThinkingOutput::default();
+        let mut tool_calls = Vec::new();
         for content_block in &response.content {
             match content_block.content_type.as_str() {
                 "thinking" => {
@@ -254,6 +409,19 @@ impl AnthropicClient {
                 }
                 "redacted_thinking" => {
                     thinking_output.redacted = content_block.data.clone();
+                }
+                "tool_use" => {
+                    if let (Some(id), Some(name), Some(input)) = (
+                        content_block.id.clone(),
+                        content_block.name.clone(),
+                        content_block.input.clone(),
+                    ) {
+                        tool_calls.push(ToolCall {
+                            id,
+                            name,
+                            arguments: input,
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -274,6 +442,7 @@ impl AnthropicClient {
                 output_tokens: response.usage.output_tokens,
             },
             thinking,
+            tool_calls,
             debug: if request_debug.is_some() || response_debug.is_some() {
                 Some(DebugTrace {
                     request: request_debug,
@@ -430,6 +599,7 @@ impl AiClient for AnthropicClient {
                                         delta: String::new(),
                                         thinking_delta: None,
                                         thinking_signature: None,
+                                        tool_call_deltas: Vec::new(),
                                         done: true,
                                         debug: if request_debug.is_some() || response_debug.is_some() {
                                             Some(DebugTrace {
@@ -458,6 +628,7 @@ impl AiClient for AnthropicClient {
                                                             delta: text,
                                                             thinking_delta: None,
                                                             thinking_signature: None,
+                                                            tool_call_deltas: Vec::new(),
                                                             done: false,
                                                             debug: if request_debug.is_some() || response_debug.is_some() {
                                                                 Some(DebugTrace {
@@ -476,6 +647,7 @@ impl AiClient for AnthropicClient {
                                                             delta: String::new(),
                                                             thinking_delta: Some(thinking),
                                                             thinking_signature: None,
+                                                            tool_call_deltas: Vec::new(),
                                                             done: false,
                                                             debug: if request_debug.is_some() || response_debug.is_some() {
                                                                 Some(DebugTrace {
@@ -494,6 +666,31 @@ impl AiClient for AnthropicClient {
                                                             delta: String::new(),
                                                             thinking_delta: None,
                                                             thinking_signature: Some(signature),
+                                                            tool_call_deltas: Vec::new(),
+                                                            done: false,
+                                                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                                                Some(DebugTrace {
+                                                                    request: request_debug.take(),
+                                                                    response: response_debug.clone(),
+                                                                })
+                                                            } else {
+                                                                None
+                                                            },
+                                                        });
+                                                    }
+                                                }
+                                                Some("input_json_delta") => {
+                                                    if let Some(arguments) = delta.partial_json {
+                                                        yield Ok(StreamChunk {
+                                                            delta: String::new(),
+                                                            thinking_delta: None,
+                                                            thinking_signature: None,
+                                                            tool_call_deltas: vec![ToolCallDelta {
+                                                                index: stream_response.index.unwrap_or(0),
+                                                                id: None,
+                                                                name: None,
+                                                                arguments: Some(arguments),
+                                                            }],
                                                             done: false,
                                                             debug: if request_debug.is_some() || response_debug.is_some() {
                                                                 Some(DebugTrace {
@@ -507,6 +704,38 @@ impl AiClient for AnthropicClient {
                                                     }
                                                 }
                                                 _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                                "content_block_start" => {
+                                    if let Ok(stream_response) =
+                                        serde_json::from_str::<AnthropicStreamResponse>(&data)
+                                    {
+                                        if let Some(content_block) = stream_response.content_block {
+                                            if content_block.content_type == "tool_use" {
+                                                yield Ok(StreamChunk {
+                                                    delta: String::new(),
+                                                    thinking_delta: None,
+                                                    thinking_signature: None,
+                                                    tool_call_deltas: vec![ToolCallDelta {
+                                                        index: stream_response.index.unwrap_or(0),
+                                                        id: content_block.id,
+                                                        name: content_block.name,
+                                                        arguments: content_block
+                                                            .input
+                                                            .map(|input| input.to_string()),
+                                                    }],
+                                                    done: false,
+                                                    debug: if request_debug.is_some() || response_debug.is_some() {
+                                                        Some(DebugTrace {
+                                                            request: request_debug.take(),
+                                                            response: response_debug.clone(),
+                                                        })
+                                                    } else {
+                                                        None
+                                                    },
+                                                });
                                             }
                                         }
                                     }
@@ -531,6 +760,7 @@ impl AiClient for AnthropicClient {
                 delta: String::new(),
                 thinking_delta: None,
                 thinking_signature: None,
+                tool_call_deltas: Vec::new(),
                 done: true,
                 debug: request_debug.map(|request| DebugTrace {
                     request: Some(request),
@@ -587,5 +817,52 @@ impl AiClient for AnthropicClient {
             serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
 
         Ok(models.data.into_iter().map(|model| model.id).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AnthropicClient;
+    use crate::ai::{ChatRequest, Message, ToolCall, ToolChoice, ToolDefinition};
+    use serde_json::json;
+
+    #[test]
+    fn convert_request_maps_tools_and_tool_results() {
+        let mut request = ChatRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![
+                Message::assistant_tool_calls(vec![ToolCall {
+                    id: "toolu_1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: json!({"city": "Tokyo"}),
+                }]),
+                Message::tool_result("toolu_1", "get_weather", json!({"temperature_c": 22})),
+            ],
+        );
+        request.tools = vec![ToolDefinition::function(
+            "get_weather",
+            Some("Return weather".to_string()),
+            json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "required": ["city"]
+            }),
+        )];
+        request.tool_choice = Some(ToolChoice::Tool("get_weather".to_string()));
+
+        let converted = AnthropicClient::convert_request(request);
+        assert_eq!(converted.tools.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            converted
+                .tool_choice
+                .as_ref()
+                .and_then(|choice| choice.name.as_deref()),
+            Some("get_weather")
+        );
+        assert_eq!(converted.messages[0].content[0].content_type, "tool_use");
+        assert_eq!(converted.messages[1].role, "user");
+        assert_eq!(converted.messages[1].content[0].content_type, "tool_result");
     }
 }

@@ -1,6 +1,6 @@
 use conect_llm::{
     AiConfig, AiProvider, ChatRequest, DebugTrace, Message, ThinkingConfig, ThinkingEffort,
-    ThinkingOutput, github_copilot_auth_path, login_github_copilot_via_device,
+    ThinkingOutput, ToolCall, github_copilot_auth_path, login_github_copilot_via_device,
     login_openai_codex_via_browser, openai_codex_auth_path, set_debug_logging,
 };
 use futures_util::StreamExt;
@@ -188,17 +188,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             role: "user".to_string(),
             content: input.clone(),
             thinking: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result: None,
+            tool_error: None,
         });
 
         messages.push(Message {
             role: "user".to_string(),
             content: input,
             thinking: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result: None,
+            tool_error: None,
         });
 
         let request = ChatRequest {
             model: model.clone(),
             messages: request_messages,
+            tools: Vec::new(),
+            tool_choice: None,
             max_tokens: Some(4096),
             temperature: None,
             system: None,
@@ -213,6 +225,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if thinking_enabled {
                         print_thinking(response.thinking.as_ref());
                     }
+                    print_tool_calls(&response.tool_calls);
                     println!();
                 }
 
@@ -224,6 +237,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         None
                     },
+                    tool_calls: response.tool_calls,
+                    tool_call_id: None,
+                    tool_name: None,
+                    tool_result: None,
+                    tool_error: None,
                 });
             }
             Err(error) => {
@@ -254,6 +272,7 @@ async fn send_request(
     let mut content = String::new();
     let mut thinking_text = String::new();
     let mut thinking_signature: Option<String> = None;
+    let mut tool_calls: Vec<(Option<String>, Option<String>, String)> = Vec::new();
     let mut printed_assistant_prefix = false;
     let mut printed_thinking_prefix = false;
     let mut debug_request: Option<String> = None;
@@ -268,6 +287,24 @@ async fn send_request(
             }
             if let Some(response) = debug.response {
                 debug_responses.push(response);
+            }
+        }
+
+        for tool_call_delta in chunk.tool_call_deltas {
+            while tool_calls.len() <= tool_call_delta.index {
+                tool_calls.push((None, None, String::new()));
+            }
+
+            if let Some(entry) = tool_calls.get_mut(tool_call_delta.index) {
+                if let Some(id) = tool_call_delta.id {
+                    entry.0 = Some(id);
+                }
+                if let Some(name) = tool_call_delta.name {
+                    entry.1 = Some(name);
+                }
+                if let Some(arguments) = tool_call_delta.arguments {
+                    entry.2.push_str(&arguments);
+                }
             }
         }
 
@@ -332,6 +369,18 @@ async fn send_request(
         } else {
             None
         },
+        tool_calls: tool_calls
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, (id, name, arguments))| {
+                name.map(|name| ToolCall {
+                    id: id.unwrap_or_else(|| format!("tool-call-{}", index)),
+                    name,
+                    arguments: serde_json::from_str(&arguments)
+                        .unwrap_or_else(|_| serde_json::Value::String(arguments)),
+                })
+            })
+            .collect(),
         debug: if debug_request.is_some() || !debug_responses.is_empty() {
             Some(DebugTrace {
                 request: debug_request,
@@ -604,6 +653,16 @@ fn print_thinking(thinking: Option<&ThinkingOutput>) {
     }
     if let Some(redacted) = &thinking.redacted {
         println!("thinking redacted> {}", redacted);
+    }
+}
+
+fn print_tool_calls(tool_calls: &[ToolCall]) {
+    if tool_calls.is_empty() {
+        return;
+    }
+
+    for tool_call in tool_calls {
+        println!("tool call> {} {}", tool_call.name, tool_call.arguments);
     }
 }
 

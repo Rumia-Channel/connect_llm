@@ -7,6 +7,7 @@ pub fn spec() -> ProviderSpec {
         default_model: "kimi-for-coding",
         supports_thinking_output: true,
         supports_thinking_config: true,
+        supports_tools: true,
         api_style: ApiStyle::Anthropic,
     }
 }
