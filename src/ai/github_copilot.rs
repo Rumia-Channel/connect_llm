@@ -11,6 +11,7 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
@@ -27,6 +28,7 @@ pub struct GitHubCopilotDeviceAuthOptions {
     pub domain: String,
     pub timeout: Duration,
     pub auth_path: Option<PathBuf>,
+    pub open_browser: bool,
 }
 
 impl Default for GitHubCopilotDeviceAuthOptions {
@@ -35,6 +37,7 @@ impl Default for GitHubCopilotDeviceAuthOptions {
             domain: DEFAULT_DOMAIN.to_string(),
             timeout: Duration::from_secs(DEFAULT_AUTH_TIMEOUT_SECS),
             auth_path: None,
+            open_browser: true,
         }
     }
 }
@@ -322,6 +325,50 @@ fn save_auth_file(path: &Path, auth: &GitHubCopilotAuthFile) -> Result<(), AiErr
     Ok(())
 }
 
+fn open_url_in_browser(url: &str) -> Result<(), AiError> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .map_err(|error| {
+                AiError::Api(format!(
+                    "Failed to open browser automatically: {}. Open this URL manually: {}",
+                    error, url
+                ))
+            })?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(url).spawn().map_err(|error| {
+            AiError::Api(format!(
+                "Failed to open browser automatically: {}. Open this URL manually: {}",
+                error, url
+            ))
+        })?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open").arg(url).spawn().map_err(|error| {
+            AiError::Api(format!(
+                "Failed to open browser automatically: {}. Open this URL manually: {}",
+                error, url
+            ))
+        })?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(AiError::Api(format!(
+        "Automatic browser opening is not supported on this platform. Open this URL manually: {}",
+        url
+    )))
+}
+
 pub fn login_github_copilot_via_device(
     options: GitHubCopilotDeviceAuthOptions,
 ) -> Result<GitHubCopilotDeviceAuth, AiError> {
@@ -365,6 +412,11 @@ pub fn login_github_copilot_via_device(
     eprintln!("GitHub Copilot device login");
     eprintln!("Visit: {}", device_data.verification_uri);
     eprintln!("Code: {}", device_data.user_code);
+    if options.open_browser {
+        if let Err(error) = open_url_in_browser(&device_data.verification_uri) {
+            eprintln!("{}", error);
+        }
+    }
     eprintln!("Waiting for authorization...");
 
     let deadline = std::time::Instant::now() + options.timeout;
@@ -449,6 +501,20 @@ pub struct GitHubCopilotClient {
 }
 
 impl GitHubCopilotClient {
+    fn fallback_model_ids() -> Vec<String> {
+        vec![
+            "claude-sonnet-4.6".to_string(),
+            "claude-sonnet-4.5".to_string(),
+            "gpt-4o".to_string(),
+            "gpt-4.1".to_string(),
+            "gpt-4.1-mini".to_string(),
+            "gpt-4.1-nano".to_string(),
+            "o1".to_string(),
+            "o1-mini".to_string(),
+            "o3-mini".to_string(),
+        ]
+    }
+
     pub fn new(config: AiConfig) -> Self {
         Self {
             client: Client::new(),
@@ -465,7 +531,7 @@ impl GitHubCopilotClient {
         if base_url.ends_with("/v1") {
             format!("{}/chat/completions", base_url)
         } else {
-            format!("{}/v1/chat/completions", base_url)
+            format!("{}/chat/completions", base_url)
         }
     }
 
@@ -474,7 +540,7 @@ impl GitHubCopilotClient {
         if base_url.ends_with("/v1") {
             format!("{}/models", base_url)
         } else {
-            format!("{}/v1/models", base_url)
+            format!("{}/models", base_url)
         }
     }
 
@@ -612,21 +678,20 @@ impl GitHubCopilotClient {
         }
     }
 
-    fn exchange_copilot_token_blocking(
-        github_token: &str,
-    ) -> Result<(String, u64, String), AiError> {
-        let client = BlockingClient::new();
-        let response = client
+    async fn exchange_copilot_token(github_token: &str) -> Result<(String, u64, String), AiError> {
+        let response = Client::new()
             .get(COPILOT_TOKEN_URL)
             .header("Accept", "application/json")
             .header("Authorization", format!("Bearer {}", github_token))
             .header("User-Agent", USER_AGENT)
             .send()
+            .await
             .map_err(|error| AiError::Http(error.to_string()))?;
 
         let status = response.status();
         let body = response
             .text()
+            .await
             .map_err(|error| AiError::Http(error.to_string()))?;
 
         if !status.is_success() {
@@ -647,8 +712,15 @@ impl GitHubCopilotClient {
 
     async fn resolve_auth(&self) -> Result<ResolvedCopilotAuth, AiError> {
         if !self.config.api_key.trim().is_empty() {
-            let (api_token, _, base_url) =
-                Self::exchange_copilot_token_blocking(self.config.api_key.trim())?;
+            let github_token = self.config.api_key.trim();
+            let exchanged = Self::exchange_copilot_token(github_token).await;
+            let (api_token, base_url) = match exchanged {
+                Ok((api_token, _, base_url)) => (api_token, base_url),
+                Err(_) => (
+                    github_token.to_string(),
+                    DEFAULT_COPILOT_BASE_URL.to_string(),
+                ),
+            };
             return Ok(ResolvedCopilotAuth {
                 api_token,
                 base_url: if self.use_custom_base_url() {
@@ -686,21 +758,31 @@ impl GitHubCopilotClient {
             }
         }
 
-        let (api_token, expires_at_ms, base_url) =
-            Self::exchange_copilot_token_blocking(auth.github_token.trim())?;
-        auth.copilot_api_token = Some(api_token.clone());
-        auth.copilot_api_token_expires_at_ms = Some(expires_at_ms);
-        auth.copilot_api_base_url = Some(base_url.clone());
-        save_auth_file(&auth_path, &auth)?;
+        match Self::exchange_copilot_token(auth.github_token.trim()).await {
+            Ok((api_token, expires_at_ms, base_url)) => {
+                auth.copilot_api_token = Some(api_token.clone());
+                auth.copilot_api_token_expires_at_ms = Some(expires_at_ms);
+                auth.copilot_api_base_url = Some(base_url.clone());
+                save_auth_file(&auth_path, &auth)?;
 
-        Ok(ResolvedCopilotAuth {
-            api_token,
-            base_url: if self.use_custom_base_url() {
-                self.config.base_url.clone()
-            } else {
-                base_url
-            },
-        })
+                Ok(ResolvedCopilotAuth {
+                    api_token,
+                    base_url: if self.use_custom_base_url() {
+                        self.config.base_url.clone()
+                    } else {
+                        base_url
+                    },
+                })
+            }
+            Err(_) => Ok(ResolvedCopilotAuth {
+                api_token: auth.github_token,
+                base_url: if self.use_custom_base_url() {
+                    self.config.base_url.clone()
+                } else {
+                    DEFAULT_COPILOT_BASE_URL.to_string()
+                },
+            }),
+        }
     }
 }
 
@@ -930,7 +1012,7 @@ impl AiClient for GitHubCopilotClient {
             .map_err(|error| AiError::Http(error.to_string()))?;
 
         if !status.is_success() {
-            return Err(api_error_from_response(status, &body));
+            return Ok(Self::fallback_model_ids());
         }
 
         #[derive(Debug, Deserialize)]
@@ -943,9 +1025,17 @@ impl AiClient for GitHubCopilotClient {
             id: String,
         }
 
-        let models: ModelsResponse =
-            serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
-        Ok(models.data.into_iter().map(|model| model.id).collect())
+        let models: ModelsResponse = match serde_json::from_str(&body) {
+            Ok(models) => models,
+            Err(_) => return Ok(Self::fallback_model_ids()),
+        };
+
+        let model_ids: Vec<String> = models.data.into_iter().map(|model| model.id).collect();
+        if model_ids.is_empty() {
+            Ok(Self::fallback_model_ids())
+        } else {
+            Ok(model_ids)
+        }
     }
 }
 

@@ -38,11 +38,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         provider.default_base_url(),
         "Press Enter to use the provider default.",
     )?;
-    let mut model = prompt_default(
-        "model",
-        provider.default_model(),
-        "Press Enter to use the provider default.",
-    )?;
     let api_key_hint = if provider == AiProvider::OpenAiCodex {
         "Press Enter to use CODEX_HOME/auth.json or ~/.codex/auth.json."
     } else if provider == AiProvider::GitHubCopilot {
@@ -52,15 +47,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let api_key = prompt("API key", api_key_hint)?;
 
-    if provider == AiProvider::GitHubCopilot && api_key.trim().is_empty() {
-        let needs_login = github_copilot_auth_path()
-            .map(|path| !path.exists())
-            .unwrap_or(true);
-        if needs_login {
-            println!("No saved GitHub Copilot auth found. Starting device login.");
-            login_github_copilot_via_device(Default::default())?;
-        }
-    }
+    ensure_provider_auth_ready(provider, &api_key).await?;
+
+    let temp_client = provider.create_client(AiConfig {
+        api_key: api_key.clone(),
+        base_url: base_url.clone(),
+        model: provider.default_model().to_string(),
+    });
+    let mut model = select_model(provider, temp_client.as_ref()).await?;
 
     let mut thinking_enabled = select_thinking_enabled(provider)?;
     let mut codex_effort = select_codex_effort(provider)?;
@@ -352,6 +346,24 @@ async fn send_request(
     })
 }
 
+async fn ensure_provider_auth_ready(
+    provider: AiProvider,
+    api_key: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if provider == AiProvider::GitHubCopilot && api_key.trim().is_empty() {
+        let needs_login = github_copilot_auth_path()
+            .map(|path| !path.exists())
+            .unwrap_or(true);
+        if needs_login {
+            println!("No saved GitHub Copilot auth found. Starting device login.");
+            tokio::task::spawn_blocking(|| login_github_copilot_via_device(Default::default()))
+                .await??;
+        }
+    }
+
+    Ok(())
+}
+
 fn select_provider() -> Result<AiProvider, Box<dyn std::error::Error>> {
     println!("Providers:");
     for (index, provider) in PROVIDERS.iter().enumerate() {
@@ -382,6 +394,73 @@ fn select_provider() -> Result<AiProvider, Box<dyn std::error::Error>> {
         }
 
         println!("unknown provider");
+    }
+}
+
+async fn select_model(
+    provider: AiProvider,
+    client: &dyn conect_llm::AiClient,
+) -> Result<String, Box<dyn std::error::Error>> {
+    println!("Fetching models...");
+
+    let default_model = provider.default_model().to_string();
+    let models = match client.list_models().await {
+        Ok(models) if !models.is_empty() => models,
+        Ok(_) => {
+            println!("No models were returned by the provider. Falling back to manual input.");
+            return prompt_default(
+                "model",
+                &default_model,
+                "Press Enter to use the provider default.",
+            )
+            .map_err(|error| error.into());
+        }
+        Err(error) => {
+            println!("Could not fetch model list: {}", error);
+            return prompt_default(
+                "model",
+                &default_model,
+                "Press Enter to use the provider default.",
+            )
+            .map_err(|error| error.into());
+        }
+    };
+
+    println!("Models:");
+    for (index, model) in models.iter().enumerate() {
+        if model == &default_model {
+            println!("  {}: {} (default)", index, model);
+        } else {
+            println!("  {}: {}", index, model);
+        }
+    }
+
+    loop {
+        let input = prompt_default("model", &default_model, "Index or model id.")?;
+        let trimmed = input.trim();
+
+        if trimmed.is_empty() {
+            return Ok(default_model.clone());
+        }
+
+        if let Ok(index) = trimmed.parse::<usize>() {
+            if let Some(model) = models.get(index) {
+                return Ok(model.clone());
+            }
+        }
+
+        if trimmed.eq_ignore_ascii_case(&default_model) {
+            return Ok(default_model.clone());
+        }
+
+        if let Some(model) = models
+            .iter()
+            .find(|model| model.eq_ignore_ascii_case(trimmed))
+        {
+            return Ok(model.clone());
+        }
+
+        println!("unknown model");
     }
 }
 
