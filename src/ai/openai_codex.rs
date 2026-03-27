@@ -1,19 +1,16 @@
 #![allow(dead_code)]
 
 mod auth;
+mod convert;
 mod protocol;
 
 use self::protocol::{
-    OpenAiCodexEvent, OpenAiCodexFunctionCallItem, OpenAiCodexFunctionCallOutputItem,
-    OpenAiCodexInputContent, OpenAiCodexInputItem, OpenAiCodexInputMessage, OpenAiCodexOutputItem,
-    OpenAiCodexReasoningRequest, OpenAiCodexRequest, OpenAiCodexResponse, OpenAiCodexTool,
-    OpenAiCodexToolChoice, PendingToolCallState, api_error_from_response,
+    OpenAiCodexEvent, OpenAiCodexRequest, OpenAiCodexResponse, PendingToolCallState,
+    api_error_from_response,
 };
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    ThinkingConfig, ThinkingEffort, ThinkingOutput, ToolCall, ToolCallDelta, ToolChoice, Usage,
-    capture_debug_json, capture_debug_text, message_tool_result_value, parse_tool_arguments,
-    serialize_tool_arguments,
+    ThinkingOutput, ToolCallDelta, capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -24,7 +21,6 @@ pub use self::auth::{
     openai_codex_auth_path,
 };
 
-const DEFAULT_CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub struct OpenAiCodexClient {
     client: Client,
     config: AiConfig,
@@ -37,200 +33,8 @@ impl OpenAiCodexClient {
             config,
         }
     }
-
-    fn endpoint_url(base_url: &str) -> String {
-        let trimmed = base_url.trim_end_matches('/');
-        if trimmed.is_empty() {
-            return DEFAULT_CODEX_ENDPOINT.to_string();
-        }
-        if trimmed.ends_with("/codex/responses") {
-            trimmed.to_string()
-        } else {
-            format!("{}/codex/responses", trimmed)
-        }
-    }
-
-    fn convert_reasoning_config(
-        thinking: Option<&ThinkingConfig>,
-    ) -> Option<OpenAiCodexReasoningRequest> {
-        let thinking = thinking?;
-
-        if !thinking.enabled {
-            return Some(OpenAiCodexReasoningRequest {
-                effort: Some("none"),
-                summary: None,
-            });
-        }
-
-        let effort = match thinking.effort.unwrap_or(ThinkingEffort::Medium) {
-            ThinkingEffort::Minimal => "minimal",
-            ThinkingEffort::Low => "low",
-            ThinkingEffort::Medium => "medium",
-            ThinkingEffort::High => "high",
-            ThinkingEffort::XHigh => "xhigh",
-        };
-
-        Some(OpenAiCodexReasoningRequest {
-            effort: Some(effort),
-            summary: Some("auto"),
-        })
-    }
-
-    fn default_instructions() -> String {
-        "You are a helpful assistant.".to_string()
-    }
-
-    fn convert_tools(tools: Vec<super::ToolDefinition>) -> Option<Vec<OpenAiCodexTool>> {
-        if tools.is_empty() {
-            return None;
-        }
-
-        Some(
-            tools
-                .into_iter()
-                .map(|tool| OpenAiCodexTool {
-                    tool_type: "function",
-                    name: tool.name,
-                    description: tool.description,
-                    parameters: tool.input_schema,
-                })
-                .collect(),
-        )
-    }
-
-    fn convert_tool_choice(tool_choice: Option<ToolChoice>) -> Option<OpenAiCodexToolChoice> {
-        match tool_choice {
-            None => None,
-            Some(ToolChoice::Auto) => Some(OpenAiCodexToolChoice::Mode("auto")),
-            Some(ToolChoice::None) => Some(OpenAiCodexToolChoice::Mode("none")),
-            Some(ToolChoice::Required) => Some(OpenAiCodexToolChoice::Mode("required")),
-            Some(ToolChoice::Tool(name)) => Some(OpenAiCodexToolChoice::Function {
-                choice_type: "function",
-                name,
-            }),
-        }
-    }
-
     fn convert_request(request: ChatRequest, stream: bool) -> OpenAiCodexRequest {
-        let ChatRequest {
-            model,
-            messages: request_messages,
-            tools,
-            tool_choice,
-            max_tokens: _,
-            temperature,
-            system,
-            thinking,
-        } = request;
-
-        let mut input = Vec::new();
-
-        for message in request_messages {
-            if message.role == "tool" {
-                if let Some(call_id) = message.tool_call_id.clone() {
-                    let output = serialize_tool_arguments(&message_tool_result_value(&message));
-
-                    input.push(OpenAiCodexInputItem::FunctionCallOutput(
-                        OpenAiCodexFunctionCallOutputItem {
-                            item_type: "function_call_output",
-                            call_id,
-                            output,
-                        },
-                    ));
-                }
-                continue;
-            }
-
-            if !message.content.is_empty() {
-                let content_type = if message.role == "assistant" {
-                    "output_text"
-                } else {
-                    "input_text"
-                };
-                input.push(OpenAiCodexInputItem::Message(OpenAiCodexInputMessage {
-                    role: message.role.clone(),
-                    content: vec![OpenAiCodexInputContent {
-                        content_type,
-                        text: message.content.clone(),
-                    }],
-                }));
-            }
-
-            for tool_call in message.tool_calls {
-                input.push(OpenAiCodexInputItem::FunctionCall(
-                    OpenAiCodexFunctionCallItem {
-                        item_type: "function_call",
-                        call_id: tool_call.id,
-                        name: tool_call.name,
-                        arguments: serialize_tool_arguments(&tool_call.arguments),
-                    },
-                ));
-            }
-        }
-
-        OpenAiCodexRequest {
-            model,
-            instructions: system.unwrap_or_else(Self::default_instructions),
-            input,
-            max_output_tokens: None,
-            temperature,
-            reasoning: Self::convert_reasoning_config(thinking.as_ref()),
-            tools: Self::convert_tools(tools),
-            tool_choice: Self::convert_tool_choice(tool_choice),
-            stream,
-            store: false,
-        }
-    }
-
-    fn extract_text_from_output(output: &[OpenAiCodexOutputItem]) -> String {
-        output
-            .iter()
-            .filter(|item| item.item_type == "message" && item.role.as_deref() == Some("assistant"))
-            .flat_map(|item| item.content.iter())
-            .filter(|part| part.content_type == "output_text")
-            .filter_map(|part| part.text.clone())
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
-    fn extract_thinking_from_output(output: &[OpenAiCodexOutputItem]) -> Option<ThinkingOutput> {
-        let text = output
-            .iter()
-            .filter(|item| item.item_type == "reasoning")
-            .flat_map(|item| item.summary.iter())
-            .filter_map(|part| part.text.clone())
-            .collect::<Vec<_>>()
-            .join("");
-
-        if text.is_empty() {
-            None
-        } else {
-            Some(ThinkingOutput {
-                text: Some(text),
-                signature: output
-                    .iter()
-                    .find(|item| item.item_type == "reasoning")
-                    .and_then(|item| item.encrypted_content.clone()),
-                redacted: None,
-            })
-        }
-    }
-
-    fn extract_tool_calls_from_output(output: &[OpenAiCodexOutputItem]) -> Vec<ToolCall> {
-        output
-            .iter()
-            .filter(|item| item.item_type == "function_call")
-            .filter_map(|item| {
-                let id = item.call_id.clone().or_else(|| item.id.clone())?;
-                let name = item.name.clone()?;
-                let arguments = item.arguments.as_deref().map(parse_tool_arguments)?;
-                Some(ToolCall {
-                    id,
-                    name,
-                    arguments,
-                })
-            })
-            .collect()
+        convert::convert_request(request, stream)
     }
 
     fn convert_response(
@@ -238,27 +42,7 @@ impl OpenAiCodexClient {
         request_debug: Option<String>,
         response_debug: Option<String>,
     ) -> ChatResponse {
-        let usage = response.usage.unwrap_or_default();
-
-        ChatResponse {
-            id: response.id,
-            content: Self::extract_text_from_output(&response.output),
-            model: response.model,
-            usage: Usage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-            },
-            thinking: Self::extract_thinking_from_output(&response.output),
-            tool_calls: Self::extract_tool_calls_from_output(&response.output),
-            debug: if request_debug.is_some() || response_debug.is_some() {
-                Some(DebugTrace {
-                    request: request_debug,
-                    response: response_debug,
-                })
-            } else {
-                None
-            },
-        }
+        convert::convert_response(response, request_debug, response_debug)
     }
 }
 
@@ -266,8 +50,8 @@ impl OpenAiCodexClient {
 impl AiClient for OpenAiCodexClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
         let auth = auth::resolve_auth(&self.client, &self.config).await?;
-        let url = Self::endpoint_url(&self.config.base_url);
-        let request = Self::convert_request(request, true);
+        let url = convert::endpoint_url(&self.config.base_url);
+        let request = convert::convert_request(request, true);
         let request_debug =
             capture_debug_json(&format!("openai_codex request POST {}", url), &request);
 
@@ -385,7 +169,7 @@ impl AiClient for OpenAiCodexClient {
         let response = final_response.ok_or_else(|| {
             AiError::Parse("missing response.completed event in Codex stream".to_string())
         })?;
-        let mut response = Self::convert_response(response, request_debug, response_debug);
+        let mut response = convert::convert_response(response, request_debug, response_debug);
         if response.content.is_empty() && !content.is_empty() {
             response.content = content;
         }
@@ -416,8 +200,8 @@ impl AiClient for OpenAiCodexClient {
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
         let client = self.client.clone();
         let config = self.config.clone();
-        let request = Self::convert_request(request, true);
-        let endpoint_url = Self::endpoint_url(&config.base_url);
+        let request = convert::convert_request(request, true);
+        let endpoint_url = convert::endpoint_url(&config.base_url);
         let request_debug = capture_debug_json(
             &format!("openai_codex stream request POST {}", endpoint_url),
             &request,
@@ -779,7 +563,9 @@ mod tests {
     use super::{
         OpenAiCodexClient,
         auth::{base64_url_decode, extract_account_id_from_tokens},
-        protocol::{OpenAiCodexInputItem, OpenAiCodexOutputItem, OpenAiCodexResponse},
+        protocol::{
+            OpenAiCodexInputItem, OpenAiCodexOutputItem, OpenAiCodexResponse, OpenAiCodexToolChoice,
+        },
     };
     use crate::ai::{
         ChatRequest, Message, ThinkingConfig, ThinkingEffort, ToolCall, ToolChoice, ToolDefinition,
@@ -888,7 +674,7 @@ mod tests {
         assert_eq!(converted.tools.as_ref().map(Vec::len), Some(1));
         assert!(matches!(
             converted.tool_choice,
-            Some(super::OpenAiCodexToolChoice::Function { .. })
+            Some(OpenAiCodexToolChoice::Function { .. })
         ));
         assert!(matches!(
             converted.input.first(),
