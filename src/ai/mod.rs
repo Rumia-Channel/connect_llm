@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod anthropic;
+mod auth_common;
 pub mod gemini;
 pub mod github_copilot;
 pub mod openai;
