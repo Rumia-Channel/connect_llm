@@ -40,6 +40,132 @@ fn is_google_openai_compat(base_url: &str) -> bool {
     normalized_base_url(base_url).contains("generativelanguage.googleapis.com")
 }
 
+#[derive(Debug, Default, Clone)]
+pub(super) struct EmbeddedThoughtState {
+    inside_thought: bool,
+    pending: String,
+}
+
+impl EmbeddedThoughtState {
+    pub(super) fn push(&mut self, chunk: &str) -> (String, Option<String>) {
+        self.pending.push_str(chunk);
+        let mut content = String::new();
+        let mut thinking = String::new();
+
+        loop {
+            if self.inside_thought {
+                if let Some(end) = self.pending.find("</thought>") {
+                    thinking.push_str(&self.pending[..end]);
+                    self.pending.drain(..end + "</thought>".len());
+                    self.inside_thought = false;
+                    continue;
+                }
+
+                let flush_len = safe_flush_len(&self.pending, "</thought>");
+                if flush_len > 0 {
+                    thinking.push_str(&self.pending[..flush_len]);
+                    self.pending.drain(..flush_len);
+                }
+                break;
+            }
+
+            if let Some(start) = self.pending.find("<thought>") {
+                content.push_str(&self.pending[..start]);
+                self.pending.drain(..start + "<thought>".len());
+                self.inside_thought = true;
+                continue;
+            }
+
+            let flush_len = safe_flush_len(&self.pending, "<thought>");
+            if flush_len > 0 {
+                content.push_str(&self.pending[..flush_len]);
+                self.pending.drain(..flush_len);
+            }
+            break;
+        }
+
+        let thinking = (!thinking.is_empty()).then_some(thinking);
+        (content, thinking)
+    }
+
+    pub(super) fn finish(mut self) -> (String, Option<String>) {
+        let tail = std::mem::take(&mut self.pending);
+        if tail.is_empty() {
+            return (String::new(), None);
+        }
+
+        if self.inside_thought {
+            (String::new(), Some(tail))
+        } else {
+            (tail, None)
+        }
+    }
+
+    pub(super) fn push_google_chunk(
+        &mut self,
+        chunk: &str,
+        google_thought: bool,
+    ) -> (String, Option<String>) {
+        if google_thought {
+            self.inside_thought = true;
+            if let Some(end) = chunk.find("</thought>") {
+                let thinking = strip_thought_tags(&chunk[..end]);
+                let visible = chunk[end + "</thought>".len()..].to_string();
+                self.inside_thought = false;
+                return (visible, (!thinking.is_empty()).then_some(thinking));
+            }
+
+            let thinking = strip_thought_tags(chunk);
+            return (String::new(), (!thinking.is_empty()).then_some(thinking));
+        }
+
+        if self.inside_thought {
+            if let Some(end) = chunk.find("</thought>") {
+                let thinking = strip_thought_tags(&chunk[..end]);
+                let visible = chunk[end + "</thought>".len()..].to_string();
+                self.inside_thought = false;
+                return (visible, (!thinking.is_empty()).then_some(thinking));
+            }
+
+            let thinking = strip_thought_tags(chunk);
+            return (String::new(), (!thinking.is_empty()).then_some(thinking));
+        }
+
+        split_embedded_thoughts(chunk)
+    }
+}
+
+fn safe_flush_len(pending: &str, tag: &str) -> usize {
+    let keep_bytes = tag.len().saturating_sub(1);
+    let max_flush = pending.len().saturating_sub(keep_bytes);
+    floor_char_boundary(pending, max_flush)
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn split_embedded_thoughts(content: &str) -> (String, Option<String>) {
+    let mut state = EmbeddedThoughtState::default();
+    let (mut visible, mut thinking) = state.push(content);
+    let (tail_visible, tail_thinking) = state.finish();
+    visible.push_str(&tail_visible);
+    match (thinking.as_mut(), tail_thinking) {
+        (Some(existing), Some(tail)) => existing.push_str(&tail),
+        (None, Some(tail)) => thinking = Some(tail),
+        _ => {}
+    }
+    (visible, thinking)
+}
+
+fn strip_thought_tags(text: &str) -> String {
+    text.replace("<thought>", "").replace("</thought>", "")
+}
+
 fn convert_thinking_config(
     base_url: &str,
     thinking: Option<&ThinkingConfig>,
@@ -203,6 +329,7 @@ pub(super) fn convert_request(request: ChatRequest, base_url: &str, stream: bool
 
 pub(super) fn convert_response(
     response: OpenAiResponse,
+    base_url: &str,
     request_debug: Option<String>,
     response_debug: Option<String>,
 ) -> ChatResponse {
@@ -211,7 +338,7 @@ pub(super) fn convert_response(
         .first()
         .map(|choice| convert_tool_calls_to_response(choice.message.tool_calls.clone()))
         .unwrap_or_default();
-    let thinking = response
+    let mut thinking = response
         .choices
         .first()
         .and_then(|choice| {
@@ -223,16 +350,41 @@ pub(super) fn convert_response(
         })
         .map(|text| ThinkingOutput {
             text: Some(text),
-            signature: None,
+            signature: response
+                .choices
+                .first()
+                .and_then(|choice| choice.message.extra_content.as_ref())
+                .and_then(|extra| extra.google.as_ref())
+                .and_then(|google| google.thought_signature.clone()),
             redacted: None,
         });
-
-    let content = response
+    let raw_content = response
         .choices
         .into_iter()
         .next()
         .and_then(|choice| choice.message.content)
         .unwrap_or_default();
+    let (content, embedded_thinking) = if is_google_openai_compat(base_url) {
+        split_embedded_thoughts(&raw_content)
+    } else {
+        (raw_content, None)
+    };
+
+    if let Some(embedded_thinking) = embedded_thinking {
+        match thinking.as_mut() {
+            Some(existing) => match existing.text.as_mut() {
+                Some(text) => text.push_str(&embedded_thinking),
+                None => existing.text = Some(embedded_thinking),
+            },
+            None => {
+                thinking = Some(ThinkingOutput {
+                    text: Some(embedded_thinking),
+                    signature: None,
+                    redacted: None,
+                })
+            }
+        }
+    }
 
     ChatResponse {
         id: response.id,
@@ -253,5 +405,70 @@ pub(super) fn convert_response(
         } else {
             None
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EmbeddedThoughtState, split_embedded_thoughts};
+
+    #[test]
+    fn split_embedded_thoughts_removes_wrapped_content() {
+        let (content, thinking) =
+            split_embedded_thoughts("<thought>abc</thought>hello<thought>def</thought>");
+        assert_eq!(content, "hello");
+        assert_eq!(thinking.as_deref(), Some("abcdef"));
+    }
+
+    #[test]
+    fn embedded_thought_state_handles_split_tags() {
+        let mut state = EmbeddedThoughtState::default();
+        let (content_1, thinking_1) = state.push("<tho");
+        assert!(content_1.is_empty());
+        assert!(thinking_1.is_none());
+
+        let (content_2, thinking_2) = state.push("ught>abc</tho");
+        assert!(content_2.is_empty());
+        assert!(thinking_2.is_none());
+
+        let (content_3, thinking_3) = state.push("ught>hello");
+        assert!(content_3.is_empty());
+        assert_eq!(thinking_3.as_deref(), Some("abc"));
+
+        let (tail_content, tail_thinking) = state.finish();
+        assert_eq!(tail_content, "hello");
+        assert!(tail_thinking.is_none());
+    }
+
+    #[test]
+    fn split_embedded_thoughts_preserves_utf8_boundaries() {
+        let mut state = EmbeddedThoughtState::default();
+        let (content_1, thinking_1) = state.push("<thought>こんにちは");
+        assert!(content_1.is_empty());
+        assert_eq!(thinking_1.as_deref(), Some("こん"));
+
+        let (content_2, thinking_2) = state.push("</thought>世界");
+        assert!(content_2.is_empty());
+        assert_eq!(thinking_2.as_deref(), Some("にちは"));
+
+        let (tail_content, tail_thinking) = state.finish();
+        assert_eq!(tail_content, "世界");
+        assert!(tail_thinking.is_none());
+    }
+
+    #[test]
+    fn google_thought_chunks_do_not_leak_into_visible_text() {
+        let mut state = EmbeddedThoughtState::default();
+        let (content_1, thinking_1) = state.push_google_chunk("<thought>hello phr", true);
+        assert!(content_1.is_empty());
+        assert_eq!(thinking_1.as_deref(), Some("hello phr"));
+
+        let (content_2, thinking_2) = state.push_google_chunk("asing", true);
+        assert!(content_2.is_empty());
+        assert_eq!(thinking_2.as_deref(), Some("asing"));
+
+        let (content_3, thinking_3) = state.push_google_chunk("</thought>visible text", false);
+        assert_eq!(content_3, "visible text");
+        assert!(thinking_3.is_none());
     }
 }

@@ -67,6 +67,7 @@ impl AiClient for OpenAiClient {
 
         Ok(convert::convert_response(
             openai_response,
+            &self.config.base_url,
             request_debug,
             response_debug,
         ))
@@ -84,9 +85,12 @@ impl AiClient for OpenAiClient {
             &format!("openai stream request POST {}", url),
             &openai_request,
         );
+        let is_google_openai_compat =
+            convert::normalized_base_url(&base_url).contains("generativelanguage.googleapis.com");
 
         let stream = async_stream::stream! {
             let mut request_debug = request_debug;
+            let mut thought_state = convert::EmbeddedThoughtState::default();
             let response = reqwest::Client::new()
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", api_key))
@@ -171,12 +175,29 @@ impl AiClient for OpenAiClient {
                     };
 
                     if let Some(choice) = stream_response.choices.first() {
-                        let delta = choice.delta.content.clone().unwrap_or_default();
+                        let raw_delta = choice.delta.content.clone().unwrap_or_default();
+                        let google_extra = choice
+                            .delta
+                            .extra_content
+                            .as_ref()
+                            .and_then(|extra| extra.google.as_ref());
+                        let google_thought = google_extra
+                            .and_then(|google| google.thought)
+                            .unwrap_or(false);
+                        let google_thought_signature = google_extra
+                            .and_then(|google| google.thought_signature.clone());
+                        let (delta, embedded_thinking_delta) = if is_google_openai_compat {
+                            thought_state.push_google_chunk(&raw_delta, google_thought)
+                        } else {
+                            (raw_delta, None)
+                        };
                         let thinking_delta = choice
                             .delta
                             .reasoning_content
                             .clone()
-                            .or_else(|| choice.delta.reasoning.clone());
+                            .or_else(|| choice.delta.reasoning.clone())
+                            .or(embedded_thinking_delta);
+
                         let tool_call_deltas =
                             convert_tool_call_deltas(choice.delta.tool_calls.clone());
                         let done = choice.finish_reason.is_some();
@@ -184,7 +205,7 @@ impl AiClient for OpenAiClient {
                         yield Ok(StreamChunk {
                             delta,
                             thinking_delta,
-                            thinking_signature: None,
+                            thinking_signature: google_thought_signature,
                             images: Vec::new(),
                             tool_call_deltas,
                             done,
@@ -199,6 +220,18 @@ impl AiClient for OpenAiClient {
                         });
 
                         if done {
+                            let (tail_delta, tail_thinking) = thought_state.clone().finish();
+                            if !tail_delta.is_empty() || tail_thinking.is_some() {
+                                yield Ok(StreamChunk {
+                                    delta: tail_delta,
+                                    thinking_delta: tail_thinking,
+                                    thinking_signature: None,
+                                    images: Vec::new(),
+                                    tool_call_deltas: Vec::new(),
+                                    done: false,
+                                    debug: None,
+                                });
+                            }
                             return;
                         }
                     }
@@ -352,6 +385,7 @@ mod tests {
                     content: Some(String::new()),
                     reasoning_content: None,
                     reasoning: None,
+                    extra_content: None,
                     tool_calls: Some(vec![OpenAiToolCall {
                         id: "call_1".to_string(),
                         call_type: "function".to_string(),
@@ -370,7 +404,7 @@ mod tests {
             },
         };
 
-        let converted = convert::convert_response(response, None, None);
+        let converted = convert::convert_response(response, "https://api.openai.com", None, None);
         assert_eq!(converted.tool_calls.len(), 1);
         assert_eq!(converted.tool_calls[0].name, "get_weather");
         assert_eq!(converted.tool_calls[0].arguments, json!({"city": "Tokyo"}));

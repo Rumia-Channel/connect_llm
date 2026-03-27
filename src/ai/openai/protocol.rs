@@ -113,6 +113,8 @@ pub(super) struct OpenAiMessageResponse {
     #[serde(default)]
     pub reasoning: Option<String>,
     #[serde(default)]
+    pub extra_content: Option<OpenAiExtraContentResponse>,
+    #[serde(default)]
     pub tool_calls: Option<Vec<OpenAiToolCall>>,
 }
 
@@ -147,10 +149,26 @@ pub(super) struct OpenAiDelta {
     #[serde(default)]
     pub reasoning: Option<String>,
     #[serde(default)]
+    pub extra_content: Option<OpenAiExtraContentResponse>,
+    #[serde(default)]
     pub tool_calls: Option<Vec<OpenAiToolCallDelta>>,
     #[serde(default)]
     #[allow(dead_code)]
     pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct OpenAiExtraContentResponse {
+    #[serde(default)]
+    pub google: Option<OpenAiGoogleExtraContentResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct OpenAiGoogleExtraContentResponse {
+    #[serde(default)]
+    pub thought: Option<bool>,
+    #[serde(default)]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
