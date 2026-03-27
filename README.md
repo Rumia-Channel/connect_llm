@@ -175,6 +175,7 @@ let thinking = ThinkingConfig {
 | `AiProvider::GoogleAiStudio` | OpenAI-compatible | No | Yes |
 | `AiProvider::Gemini` | Gemini native | Yes | Yes |
 | `AiProvider::OpenAi` | OpenAI-compatible | No | No |
+| `AiProvider::OpenAiCodex` | ChatGPT Codex backend | No | No |
 | `AiProvider::Sakura` | OpenAI-compatible | Yes | No |
 | `AiProvider::Kimi` | OpenAI-compatible | Yes | Yes |
 | `AiProvider::KimiCoding` | Anthropic | Yes | Yes |
@@ -204,10 +205,69 @@ println!("{}", provider.supports_thinking_config());
 - `AiProvider::GoogleAiStudio` は `https://generativelanguage.googleapis.com/v1beta/openai` の OpenAI compatibility を使います。
 - `AiProvider::Gemini` は `generateContent` / `streamGenerateContent` を使う native Gemini API です。
 - `AiProvider::OpenAi` は現状 `chat.completions` ベースです。Thinking は公開 capability としては `false` 扱いです。
+- `AiProvider::OpenAiCodex` は `https://chatgpt.com/backend-api/codex/responses` を使います。
+- `AiProvider::OpenAiCodex` の `api_key` は通常の OpenAI API key ではなく、ChatGPT OAuth の access token として扱います。
+- `AiProvider::OpenAiCodex` では `api_key` を空にすると `CODEX_HOME/auth.json` または `~/.codex/auth.json` から access token / refresh token を読みます。
+- `AiProvider::OpenAiCodex` は access token の期限が近い場合、`refresh_token` を使って `auth.openai.com/oauth/token` で更新し、`auth.json` へ書き戻します。
 - `AiProvider::GoogleAiStudio` は request 側で Gemini の `thinking_config` を送れますが、このライブラリでは structured thinking output の公開 capability は `false` にしています。
 - OpenAI 互換 provider でも `reasoning_content` を返す実装なら、transport 側は受け取れるようにしてあります。
 - `Message.thinking` は provider によっては一部しか使われません。OpenAI 互換系では主に `text` を再送します。
 - `chat_stream()` は `BoxStream<'static, Result<StreamChunk, AiError>>` を返します。
+
+## OpenAI Codex の使い方
+
+`opencode` に寄せて、ChatGPT OAuth ベースの Codex backend を直接叩けるようにしています。
+
+### ブラウザからログインする
+
+```rust
+use conect_llm::{
+    login_openai_codex_via_browser, OpenAiCodexBrowserAuthOptions,
+};
+
+let auth = login_openai_codex_via_browser(OpenAiCodexBrowserAuthOptions::default())?;
+
+println!("{}", auth.auth_path.display());
+```
+
+この helper は以下を行います。
+
+- `localhost:1455` で callback を待ち受ける
+- ブラウザを開いて ChatGPT OAuth を開始する
+- `auth.openai.com/oauth/token` で code exchange を行う
+- `~/.codex/auth.json` または `CODEX_HOME/auth.json` に保存する
+
+`opencode` と同様、保存先の `auth.json` は後続の `AiProvider::OpenAiCodex` からそのまま利用できます。
+
+### Codex CLI のログイン情報をそのまま使う
+
+```rust
+use conect_llm::{AiConfig, AiProvider};
+
+let provider = AiProvider::OpenAiCodex;
+let client = provider.create_client(AiConfig {
+    api_key: String::new(),
+    base_url: provider.default_base_url().to_string(),
+    model: provider.default_model().to_string(),
+});
+```
+
+この場合は `~/.codex/auth.json` を読みます。`CODEX_HOME` を設定している場合はそちらが優先されます。
+
+### access token を直接渡す
+
+```rust
+use conect_llm::{AiConfig, AiProvider};
+
+let provider = AiProvider::OpenAiCodex;
+let client = provider.create_client(AiConfig {
+    api_key: std::env::var("OPENAI_OAUTH_ACCESS_TOKEN")?,
+    base_url: provider.default_base_url().to_string(),
+    model: "gpt-5.4".to_string(),
+});
+```
+
+この場合、`api_key` は `sk-...` の API key ではなく ChatGPT OAuth の bearer token です。
 
 ## 開発
 

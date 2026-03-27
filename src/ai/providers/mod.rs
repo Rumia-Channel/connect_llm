@@ -4,6 +4,7 @@ pub mod google_ai_studio;
 pub mod kimi;
 pub mod kimi_coding;
 pub mod openai;
+pub mod openai_codex;
 pub mod sakura;
 pub mod zai;
 pub mod zai_coding;
@@ -13,6 +14,7 @@ pub enum ApiStyle {
     Anthropic,
     Gemini,
     OpenAi,
+    OpenAiCodex,
 }
 
 #[derive(Debug, Clone, Copy)]
