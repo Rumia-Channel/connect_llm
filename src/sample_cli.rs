@@ -10,7 +10,7 @@ use self::settings::{
     select_thinking_enabled, temp_client,
 };
 use self::streaming::send_request;
-use conect_llm::{AiConfig, ChatRequest, Message, set_debug_logging};
+use conect_llm::{AiConfig, ChatRequest, ContextManager, Message, set_debug_logging};
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("conect_llm sample chat");
@@ -47,6 +47,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         base_url,
         model: model.clone(),
     });
+    let context_manager = ContextManager::default();
 
     println!();
     println!(
@@ -178,8 +179,33 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             thinking: build_thinking_config(provider, thinking_enabled, codex_effort),
         };
 
-        match send_request(client.as_ref(), request, use_stream, thinking_enabled).await {
-            Ok(response) => {
+        let prepared = context_manager
+            .prepare_request(client.as_ref(), request)
+            .await?;
+        if use_stream {
+            if let Some(compaction) = &prepared.compaction {
+                println!(
+                    "context manager> compacted {} earlier messages ({} -> {} estimated tokens)",
+                    compaction.summarized_messages,
+                    compaction.estimated_tokens_before,
+                    compaction.estimated_tokens_after
+                );
+            }
+        }
+        let prepared_request = prepared.request;
+        let prepared_compaction = prepared.compaction.clone();
+
+        match if use_stream {
+            send_request(client.as_ref(), prepared_request, true, thinking_enabled)
+                .await
+                .map(|response| (response, prepared_compaction))
+        } else {
+            context_manager
+                .chat(client.as_ref(), prepared_request)
+                .await
+                .map(|managed| (managed.response, managed.compaction))
+        } {
+            Ok((response, compaction)) => {
                 println!();
                 if !use_stream {
                     println!("assistant> {}", response.content.trim_end());
@@ -187,6 +213,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         print_thinking(response.thinking.as_ref());
                     }
                     print_tool_calls(&response.tool_calls);
+                    if let Some(compaction) = &compaction {
+                        println!(
+                            "context manager> compacted {} earlier messages ({} -> {} estimated tokens)",
+                            compaction.summarized_messages,
+                            compaction.estimated_tokens_before,
+                            compaction.estimated_tokens_after
+                        );
+                    }
                     println!();
                 }
 

@@ -25,8 +25,25 @@ impl AnthropicClient {
         }
     }
 
+    fn is_native_anthropic(&self) -> bool {
+        self.config.base_url.contains("api.anthropic.com")
+    }
+
+    fn is_kimi_coding(&self) -> bool {
+        self.config.base_url.contains("kimi.com/coding")
+    }
+
+    fn anthropic_beta_header(&self) -> Option<&'static str> {
+        self.is_native_anthropic()
+            .then_some("interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
+    }
+
     fn default_max_tokens(&self, model: &str) -> u32 {
-        if self.config.base_url.contains("api.anthropic.com") {
+        if self.is_kimi_coding() {
+            return 32_768;
+        }
+
+        if self.is_native_anthropic() {
             return match model {
                 model if model.starts_with("claude-opus-4-1") => 32_000,
                 model if model.starts_with("claude-opus-4") => 32_000,
@@ -42,10 +59,34 @@ impl AnthropicClient {
         8_192
     }
 
-    fn resolve_request_max_tokens(&self, mut request: ChatRequest) -> ChatRequest {
+    fn default_thinking_budget(&self, request: &ChatRequest) -> Option<u32> {
+        let thinking = request.thinking.as_ref()?;
+        if !thinking.enabled || thinking.budget_tokens.is_some() {
+            return None;
+        }
+
+        if self.is_kimi_coding() {
+            let max_tokens = request
+                .max_tokens
+                .unwrap_or_else(|| self.default_max_tokens(&request.model));
+            return Some((max_tokens / 2).saturating_sub(1).min(16_000));
+        }
+
+        None
+    }
+
+    fn resolve_request_defaults(&self, mut request: ChatRequest) -> ChatRequest {
         if request.max_tokens.is_none() {
             request.max_tokens = Some(self.default_max_tokens(&request.model));
         }
+
+        let default_thinking_budget = self.default_thinking_budget(&request);
+        if let (Some(thinking), Some(budget_tokens)) =
+            (&mut request.thinking, default_thinking_budget)
+        {
+            thinking.budget_tokens = Some(budget_tokens);
+        }
+
         request
     }
 }
@@ -53,7 +94,7 @@ impl AnthropicClient {
 #[async_trait::async_trait]
 impl AiClient for AnthropicClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
-        let request = self.resolve_request_max_tokens(request);
+        let request = self.resolve_request_defaults(request);
         let url = format!("{}/v1/messages", self.config.base_url);
         let anthropic_request = convert::convert_request(request);
         let request_debug = capture_debug_json(
@@ -61,12 +102,17 @@ impl AiClient for AnthropicClient {
             &anthropic_request,
         );
 
-        let response = self
+        let mut builder = self
             .client
             .post(&url)
             .header("x-api-key", &self.config.api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        if let Some(beta) = self.anthropic_beta_header() {
+            builder = builder.header("anthropic-beta", beta);
+        }
+
+        let response = builder
             .json(&anthropic_request)
             .send()
             .await
@@ -100,11 +146,12 @@ impl AiClient for AnthropicClient {
         &self,
         request: ChatRequest,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
-        let request = self.resolve_request_max_tokens(request);
+        let request = self.resolve_request_defaults(request);
         let url = format!("{}/v1/messages", self.config.base_url);
         let mut anthropic_request = convert::convert_request(request);
         anthropic_request.stream = Some(true);
         let api_key = self.config.api_key.clone();
+        let anthropic_beta_header = self.anthropic_beta_header().map(str::to_string);
         let request_debug = capture_debug_json(
             &format!("anthropic stream request POST {}", url),
             &anthropic_request,
@@ -112,11 +159,16 @@ impl AiClient for AnthropicClient {
 
         let stream = async_stream::stream! {
             let mut request_debug = request_debug;
-            let response = reqwest::Client::new()
+            let mut builder = reqwest::Client::new()
                 .post(&url)
                 .header("x-api-key", &api_key)
                 .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
+                .header("content-type", "application/json");
+            if let Some(beta) = anthropic_beta_header.as_deref() {
+                builder = builder.header("anthropic-beta", beta);
+            }
+
+            let response = builder
                 .json(&anthropic_request)
                 .send()
                 .await;
@@ -205,10 +257,15 @@ impl AiClient for AnthropicClient {
     async fn list_models(&self) -> Result<Vec<String>, AiError> {
         let url = format!("{}/v1/models", self.config.base_url);
 
-        let response = reqwest::Client::new()
+        let mut builder = reqwest::Client::new()
             .get(&url)
             .header("x-api-key", &self.config.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", "2023-06-01");
+        if let Some(beta) = self.anthropic_beta_header() {
+            builder = builder.header("anthropic-beta", beta);
+        }
+
+        let response = builder
             .send()
             .await
             .map_err(|error| AiError::Http(error.to_string()))?;
@@ -220,11 +277,8 @@ impl AiClient for AnthropicClient {
             .map_err(|error| AiError::Http(error.to_string()))?;
 
         if !status.is_success() {
-            if self.config.base_url.contains("kimi.com/coding") {
-                return Ok(vec![
-                    "kimi-for-coding".to_string(),
-                    "anthropic/k2p5".to_string(),
-                ]);
+            if self.is_kimi_coding() {
+                return Ok(vec!["k2p5".to_string(), "kimi-k2-thinking".to_string()]);
             }
             return Ok(vec!["claude-sonnet-4-20250514".to_string()]);
         }
@@ -249,7 +303,9 @@ impl AiClient for AnthropicClient {
 #[cfg(test)]
 mod tests {
     use super::{AnthropicClient, convert};
-    use crate::ai::{AiConfig, ChatRequest, Message, ToolCall, ToolChoice, ToolDefinition};
+    use crate::ai::{
+        AiConfig, ChatRequest, Message, ThinkingConfig, ToolCall, ToolChoice, ToolDefinition,
+    };
     use serde_json::json;
 
     #[test]
@@ -301,7 +357,28 @@ mod tests {
         });
 
         let request = ChatRequest::new("claude-sonnet-4-20250514", vec![Message::user("hi")]);
-        let resolved = client.resolve_request_max_tokens(request);
+        let resolved = client.resolve_request_defaults(request);
         assert_eq!(resolved.max_tokens, Some(64_000));
+    }
+
+    #[test]
+    fn resolves_kimi_coding_defaults() {
+        let client = AnthropicClient::new(AiConfig {
+            api_key: "test".to_string(),
+            base_url: "https://api.kimi.com/coding".to_string(),
+            model: "k2p5".to_string(),
+        });
+
+        let mut request = ChatRequest::new("k2p5", vec![Message::user("hi")]);
+        request.thinking = Some(ThinkingConfig::enabled());
+
+        let resolved = client.resolve_request_defaults(request);
+        assert_eq!(resolved.max_tokens, Some(32_768));
+        assert_eq!(
+            resolved
+                .thinking
+                .and_then(|thinking| thinking.budget_tokens),
+            Some(16_000)
+        );
     }
 }

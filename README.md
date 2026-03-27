@@ -20,6 +20,11 @@
 - `ChatRequest`
 - `ChatResponse`
 - `DebugTrace`
+- `ContextManager`
+- `ContextManagerConfig`
+- `PreparedChatRequest`
+- `ManagedChatResponse`
+- `ModelContextLimits`
 - `Message`
 - `StreamChunk`
 - `ThinkingConfig`
@@ -29,8 +34,66 @@
 - `ToolChoice`
 - `ToolCall`
 - `ToolCallDelta`
+- `TextWindow`
+- `TextWindowConfig`
 
 `src/lib.rs` から再 export されているので、通常は `conect_llm::...` で参照できます。
+
+## 巨大コンテキスト対応
+
+長い会話履歴や巨大な本文をそのまま投げ続けると、provider の context window を超えて失敗します。  
+このライブラリには `ContextManager` を入れてあり、送信前の概算 token 見積もり、古い履歴の段階的要約、overflow 後の compaction retry を行えます。
+
+```rust
+use conect_llm::{
+    AiConfig, AiProvider, ChatRequest, ContextManager, Message,
+};
+
+let provider = AiProvider::Anthropic;
+let client = provider.create_client(AiConfig {
+    api_key: std::env::var("API_KEY")?,
+    base_url: provider.default_base_url().to_string(),
+    model: provider.default_model().to_string(),
+});
+
+let manager = ContextManager::default();
+
+let request = ChatRequest::new(
+    client.config().model.clone(),
+    vec![
+        Message::user("長い前提その1 ..."),
+        Message::assistant("長い応答その1 ..."),
+        Message::user("長い前提その2 ..."),
+    ],
+);
+
+let managed = manager.chat(client.as_ref(), request).await?;
+println!("{}", managed.response.content);
+
+if let Some(compaction) = managed.compaction {
+    println!(
+        "compacted {} messages ({} -> {} est tokens)",
+        compaction.summarized_messages,
+        compaction.estimated_tokens_before,
+        compaction.estimated_tokens_after,
+    );
+}
+```
+
+streaming では先に `prepare_request()` してから `chat_stream()` へ渡します。
+
+```rust
+let prepared = manager.prepare_stream_request(client.as_ref(), request).await?;
+let mut stream = client.chat_stream(prepared.request);
+```
+
+巨大ファイル本文を分割して送りたいだけなら、`split_text_into_windows()` も使えます。
+
+```rust
+use conect_llm::{TextWindowConfig, split_text_into_windows};
+
+let windows = split_text_into_windows(&very_large_text, TextWindowConfig::default());
+```
 
 ## デバッグ
 

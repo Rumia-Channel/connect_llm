@@ -323,7 +323,7 @@ impl ThinkingConfig {
         Self {
             enabled: true,
             effort: None,
-            budget_tokens: Some(1024),
+            budget_tokens: None,
             display: None,
             clear_history: None,
         }
@@ -333,7 +333,7 @@ impl ThinkingConfig {
         Self {
             enabled: true,
             effort: Some(effort),
-            budget_tokens: Some(1024),
+            budget_tokens: None,
             display: None,
             clear_history: None,
         }
