@@ -115,7 +115,7 @@ if let Some(thinking) = &response.thinking {
 `ThinkingOutput` の意味は次の通りです。
 
 - `text`: 人間が読める thinking 本文または要約
-- `signature`: Anthropic 系の署名付き thinking に使う値
+- `signature`: Anthropic 系の署名付き thinking や GitHub Copilot の `reasoning_opaque` に使う値
 - `redacted`: Anthropic 系の `redacted_thinking`
 
 ### 2. ストリームとして取得する
@@ -226,6 +226,7 @@ let thinking = ThinkingConfig {
 | Provider | API style | Thinking 出力 | Thinking 設定 |
 | --- | --- | --- | --- |
 | `AiProvider::Anthropic` | Anthropic | Yes | Yes |
+| `AiProvider::GitHubCopilot` | OpenAI-compatible (Copilot) | Yes | Yes |
 | `AiProvider::GoogleAiStudio` | OpenAI-compatible | No | Yes |
 | `AiProvider::Gemini` | Gemini native | Yes | Yes |
 | `AiProvider::OpenAi` | OpenAI-compatible | No | No |
@@ -258,6 +259,11 @@ println!("{}", provider.supports_thinking_config());
 
 - `AiProvider::GoogleAiStudio` は `https://generativelanguage.googleapis.com/v1beta/openai` の OpenAI compatibility を使います。
 - `AiProvider::Gemini` は `generateContent` / `streamGenerateContent` を使う native Gemini API です。
+- `AiProvider::GitHubCopilot` は `chat/completions` を使う Copilot の OpenAI-compatible endpoint を叩きます。
+- `AiProvider::GitHubCopilot` は request header に `Openai-Intent: conversation-edits` と `x-initiator` を付けます。ここは `opencode` の実装に合わせています。
+- `AiProvider::GitHubCopilot` の `api_key` は GitHub token として扱い、内部で Copilot API token に交換します。
+- `AiProvider::GitHubCopilot` では `api_key` を空にすると `COPILOT_HOME/auth.json` または `~/.copilot/auth.json` から GitHub token を読みます。
+- `AiProvider::GitHubCopilot` は `ChatRequest.thinking.effort` を `reasoning_effort` として、`budget_tokens` を `thinking_budget` として送ります。
 - `AiProvider::OpenAi` は現状 `chat.completions` ベースです。Thinking は公開 capability としては `false` 扱いです。
 - `AiProvider::OpenAiCodex` は `https://chatgpt.com/backend-api/codex/responses` を使います。
 - `AiProvider::OpenAiCodex` の `api_key` は通常の OpenAI API key ではなく、ChatGPT OAuth の access token として扱います。
@@ -354,6 +360,61 @@ let request = ChatRequest {
 ```
 
 Codex ではこの `thinking.effort` を `reasoning.effort` として送ります。thinking の ON/OFF 自体は `ThinkingConfig::enabled()` / `ThinkingConfig::disabled()` で切り替え、Codex の強さだけ変えたいときに `effort` を足す形です。モデルは `AiConfig.model` と `ChatRequest.model` のどちらでも指定できますが、実際に送信されるのは `ChatRequest.model` です。
+
+## GitHub Copilot の使い方
+
+`opencode` の device flow を踏襲して、GitHub token を取得し、それを Copilot API token に交換して使う形にしています。
+
+### device login を実行する
+
+```rust
+use conect_llm::{
+    login_github_copilot_via_device, GitHubCopilotDeviceAuthOptions,
+};
+
+let auth = login_github_copilot_via_device(GitHubCopilotDeviceAuthOptions::default())?;
+
+println!("{}", auth.auth_path.display());
+```
+
+この helper は以下を行います。
+
+- GitHub device code を発行する
+- URL と one-time code を表示する
+- 認可完了まで polling する
+- `~/.copilot/auth.json` または `COPILOT_HOME/auth.json` に保存する
+
+### 保存済み auth をそのまま使う
+
+```rust
+use conect_llm::{AiConfig, AiProvider};
+
+let provider = AiProvider::GitHubCopilot;
+let client = provider.create_client(AiConfig {
+    api_key: String::new(),
+    base_url: provider.default_base_url().to_string(),
+    model: provider.default_model().to_string(),
+});
+```
+
+この場合は保存済みの GitHub token を読み、内部で Copilot API token へ交換します。
+
+### GitHub token を直接渡す
+
+```rust
+use conect_llm::{AiConfig, AiProvider};
+
+let provider = AiProvider::GitHubCopilot;
+let client = provider.create_client(AiConfig {
+    api_key: std::env::var("GITHUB_TOKEN")?,
+    base_url: provider.default_base_url().to_string(),
+    model: "gpt-4o".to_string(),
+});
+```
+
+### thinking を再送する
+
+GitHub Copilot は visible thinking とは別に `reasoning_opaque` を返すことがあります。このライブラリでは `ThinkingOutput.signature` に入れて再送します。
 
 ## 開発
 

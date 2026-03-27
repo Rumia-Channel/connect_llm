@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod gemini;
+pub mod github_copilot;
 pub mod google_ai_studio;
 pub mod kimi;
 pub mod kimi_coding;
@@ -13,6 +14,7 @@ pub mod zai_coding;
 pub enum ApiStyle {
     Anthropic,
     Gemini,
+    GitHubCopilot,
     OpenAi,
     OpenAiCodex,
 }

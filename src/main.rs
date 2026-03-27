@@ -1,13 +1,14 @@
 use conect_llm::{
     AiConfig, AiProvider, ChatRequest, DebugTrace, Message, ThinkingConfig, ThinkingEffort,
-    ThinkingOutput, set_debug_logging,
+    ThinkingOutput, github_copilot_auth_path, login_github_copilot_via_device, set_debug_logging,
 };
 use futures_util::StreamExt;
 use std::io::{self, Write};
 
-const PROVIDERS: [AiProvider; 10] = [
+const PROVIDERS: [AiProvider; 11] = [
     AiProvider::Sakura,
     AiProvider::Anthropic,
+    AiProvider::GitHubCopilot,
     AiProvider::OpenAi,
     AiProvider::OpenAiCodex,
     AiProvider::Kimi,
@@ -44,10 +45,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let api_key_hint = if provider == AiProvider::OpenAiCodex {
         "Press Enter to use CODEX_HOME/auth.json or ~/.codex/auth.json."
+    } else if provider == AiProvider::GitHubCopilot {
+        "Press Enter to use COPILOT_HOME/auth.json or ~/.copilot/auth.json."
     } else {
         "Typed visibly, stored only in memory for this run."
     };
     let api_key = prompt("API key", api_key_hint)?;
+
+    if provider == AiProvider::GitHubCopilot && api_key.trim().is_empty() {
+        let needs_login = github_copilot_auth_path()
+            .map(|path| !path.exists())
+            .unwrap_or(true);
+        if needs_login {
+            println!("No saved GitHub Copilot auth found. Starting device login.");
+            login_github_copilot_via_device(Default::default())?;
+        }
+    }
 
     let mut thinking_enabled = select_thinking_enabled(provider)?;
     let mut codex_effort = select_codex_effort(provider)?;
@@ -245,6 +258,7 @@ async fn send_request(
     let mut stream = client.chat_stream(request);
     let mut content = String::new();
     let mut thinking_text = String::new();
+    let mut thinking_signature: Option<String> = None;
     let mut printed_assistant_prefix = false;
     let mut printed_thinking_prefix = false;
     let mut debug_request: Option<String> = None;
@@ -286,6 +300,9 @@ async fn send_request(
                     .map_err(|error| conect_llm::AiError::Http(error.to_string()))?;
                 thinking_text.push_str(&thinking_delta);
             }
+            if let Some(signature) = chunk.thinking_signature {
+                thinking_signature = Some(signature);
+            }
         }
 
         if chunk.done {
@@ -308,7 +325,13 @@ async fn send_request(
         thinking: if include_thinking && !thinking_text.is_empty() {
             Some(ThinkingOutput {
                 text: Some(thinking_text),
-                signature: None,
+                signature: thinking_signature,
+                redacted: None,
+            })
+        } else if include_thinking && thinking_signature.is_some() {
+            Some(ThinkingOutput {
+                text: None,
+                signature: thinking_signature,
                 redacted: None,
             })
         } else {
@@ -376,11 +399,12 @@ fn select_thinking_enabled(provider: AiProvider) -> Result<bool, Box<dyn std::er
 fn select_codex_effort(
     provider: AiProvider,
 ) -> Result<Option<ThinkingEffort>, Box<dyn std::error::Error>> {
-    let default_value = if provider == AiProvider::OpenAiCodex {
-        "medium"
-    } else {
-        "default"
-    };
+    let default_value =
+        if provider == AiProvider::OpenAiCodex || provider == AiProvider::GitHubCopilot {
+            "medium"
+        } else {
+            "default"
+        };
     let input = prompt_default(
         "codex effort",
         default_value,
@@ -457,7 +481,7 @@ fn build_thinking_config(
     }
 
     let mut thinking = ThinkingConfig::enabled();
-    if provider == AiProvider::OpenAiCodex {
+    if provider == AiProvider::OpenAiCodex || provider == AiProvider::GitHubCopilot {
         thinking.effort = codex_effort;
     }
     Some(thinking)

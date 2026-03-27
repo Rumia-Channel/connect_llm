@@ -2,11 +2,16 @@
 
 pub mod anthropic;
 pub mod gemini;
+pub mod github_copilot;
 pub mod openai;
 pub mod openai_codex;
 pub mod providers;
 
 use futures_util::stream::BoxStream;
+pub use github_copilot::{
+    GitHubCopilotDeviceAuth, GitHubCopilotDeviceAuthOptions, github_copilot_auth_path,
+    login_github_copilot_via_device,
+};
 pub use openai_codex::{
     OpenAiCodexBrowserAuth, OpenAiCodexBrowserAuthOptions, login_openai_codex_via_browser,
 };
@@ -229,6 +234,7 @@ impl std::error::Error for AiError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiProvider {
     Anthropic,
+    GitHubCopilot,
     GoogleAiStudio,
     Gemini,
     OpenAi,
@@ -244,6 +250,7 @@ impl AiProvider {
     fn spec(&self) -> ProviderSpec {
         match self {
             AiProvider::Anthropic => providers::anthropic::spec(),
+            AiProvider::GitHubCopilot => providers::github_copilot::spec(),
             AiProvider::GoogleAiStudio => providers::google_ai_studio::spec(),
             AiProvider::Gemini => providers::gemini::spec(),
             AiProvider::OpenAi => providers::openai::spec(),
@@ -260,14 +267,15 @@ impl AiProvider {
         match index {
             0 => AiProvider::Sakura,
             1 => AiProvider::Anthropic,
-            2 => AiProvider::OpenAi,
-            3 => AiProvider::OpenAiCodex,
-            4 => AiProvider::Kimi,
-            5 => AiProvider::KimiCoding,
-            6 => AiProvider::ZAi,
-            7 => AiProvider::ZAiCoding,
-            8 => AiProvider::GoogleAiStudio,
-            9 => AiProvider::Gemini,
+            2 => AiProvider::GitHubCopilot,
+            3 => AiProvider::OpenAi,
+            4 => AiProvider::OpenAiCodex,
+            5 => AiProvider::Kimi,
+            6 => AiProvider::KimiCoding,
+            7 => AiProvider::ZAi,
+            8 => AiProvider::ZAiCoding,
+            9 => AiProvider::GoogleAiStudio,
+            10 => AiProvider::Gemini,
             _ => AiProvider::Sakura,
         }
     }
@@ -276,20 +284,22 @@ impl AiProvider {
         match self {
             AiProvider::Sakura => 0,
             AiProvider::Anthropic => 1,
-            AiProvider::OpenAi => 2,
-            AiProvider::OpenAiCodex => 3,
-            AiProvider::Kimi => 4,
-            AiProvider::KimiCoding => 5,
-            AiProvider::ZAi => 6,
-            AiProvider::ZAiCoding => 7,
-            AiProvider::GoogleAiStudio => 8,
-            AiProvider::Gemini => 9,
+            AiProvider::GitHubCopilot => 2,
+            AiProvider::OpenAi => 3,
+            AiProvider::OpenAiCodex => 4,
+            AiProvider::Kimi => 5,
+            AiProvider::KimiCoding => 6,
+            AiProvider::ZAi => 7,
+            AiProvider::ZAiCoding => 8,
+            AiProvider::GoogleAiStudio => 9,
+            AiProvider::Gemini => 10,
         }
     }
 
     pub fn from_name(name: &str) -> Self {
         match name {
             "Anthropic" => AiProvider::Anthropic,
+            "GitHubCopilot" | "GitHub Copilot" | "Copilot" => AiProvider::GitHubCopilot,
             "GoogleAiStudio" | "Google AI Studio" => AiProvider::GoogleAiStudio,
             "Gemini" => AiProvider::Gemini,
             "OpenAi" | "OpenAI" => AiProvider::OpenAi,
@@ -317,6 +327,9 @@ impl AiProvider {
                 Arc::new(anthropic::AnthropicClient::new(config)) as Arc<dyn AiClient>
             }
             ApiStyle::Gemini => Arc::new(gemini::GeminiClient::new(config)) as Arc<dyn AiClient>,
+            ApiStyle::GitHubCopilot => {
+                Arc::new(github_copilot::GitHubCopilotClient::new(config)) as Arc<dyn AiClient>
+            }
             ApiStyle::OpenAi => Arc::new(openai::OpenAiClient::new(config)) as Arc<dyn AiClient>,
             ApiStyle::OpenAiCodex => {
                 Arc::new(openai_codex::OpenAiCodexClient::new(config)) as Arc<dyn AiClient>
