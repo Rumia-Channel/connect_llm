@@ -14,6 +14,7 @@ pub use github_copilot::{
 };
 pub use openai_codex::{
     OpenAiCodexBrowserAuth, OpenAiCodexBrowserAuthOptions, login_openai_codex_via_browser,
+    openai_codex_auth_path,
 };
 use providers::{ApiStyle, ProviderSpec};
 use serde::{Deserialize, Serialize};

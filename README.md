@@ -301,6 +301,8 @@ println!("{}", auth.auth_path.display());
 
 `opencode` と同様、保存先の `auth.json` は後続の `AiProvider::OpenAiCodex` からそのまま利用できます。
 
+sample CLI で `AiProvider::OpenAiCodex` を選び、`API key` を空のまま進めた場合も、保存済み `auth.json` がなければ同じ browser login を自動で開始します。CLI 側では `spawn_blocking` 経由で呼ぶため、Tokio runtime 上での blocking client panic を避けています。
+
 ### Codex CLI のログイン情報をそのまま使う
 
 ```rust

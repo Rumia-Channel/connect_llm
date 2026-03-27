@@ -1,6 +1,7 @@
 use conect_llm::{
     AiConfig, AiProvider, ChatRequest, DebugTrace, Message, ThinkingConfig, ThinkingEffort,
-    ThinkingOutput, github_copilot_auth_path, login_github_copilot_via_device, set_debug_logging,
+    ThinkingOutput, github_copilot_auth_path, login_github_copilot_via_device,
+    login_openai_codex_via_browser, openai_codex_auth_path, set_debug_logging,
 };
 use futures_util::StreamExt;
 use std::io::{self, Write};
@@ -350,6 +351,17 @@ async fn ensure_provider_auth_ready(
     provider: AiProvider,
     api_key: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if provider == AiProvider::OpenAiCodex && api_key.trim().is_empty() {
+        let needs_login = openai_codex_auth_path()
+            .map(|path| !path.exists())
+            .unwrap_or(true);
+        if needs_login {
+            println!("No saved OpenAI Codex auth found. Starting browser login.");
+            tokio::task::spawn_blocking(|| login_openai_codex_via_browser(Default::default()))
+                .await??;
+        }
+    }
+
     if provider == AiProvider::GitHubCopilot && api_key.trim().is_empty() {
         let needs_login = github_copilot_auth_path()
             .map(|path| !path.exists())

@@ -660,6 +660,10 @@ fn resolve_codex_home() -> Option<PathBuf> {
     None
 }
 
+pub fn openai_codex_auth_path() -> Result<PathBuf, AiError> {
+    resolve_codex_auth_path()
+}
+
 fn resolve_codex_auth_path() -> Result<PathBuf, AiError> {
     resolve_codex_auth_path_with_override(None)
 }
