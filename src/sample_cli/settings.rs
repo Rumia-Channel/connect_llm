@@ -5,10 +5,11 @@ use connect_llm::{
 };
 use std::sync::Arc;
 
-pub(crate) const PROVIDERS: [AiProvider; 11] = [
+pub(crate) const PROVIDERS: [AiProvider; 12] = [
     AiProvider::Sakura,
     AiProvider::Anthropic,
     AiProvider::GitHubCopilot,
+    AiProvider::Grok,
     AiProvider::OpenAi,
     AiProvider::OpenAiCodex,
     AiProvider::Kimi,

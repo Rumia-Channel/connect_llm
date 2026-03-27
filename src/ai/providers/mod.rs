@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod gemini;
 pub mod github_copilot;
 pub mod google_ai_studio;
+pub mod grok;
 pub mod kimi;
 pub mod kimi_coding;
 pub mod openai;
@@ -22,6 +23,7 @@ pub enum ModelFamily {
 pub enum RequestPolicyProfile {
     Anthropic,
     Gemini,
+    Grok,
     GitHubCopilot,
     OpenAi,
     OpenAiCodex,
@@ -95,6 +97,7 @@ impl ProviderSpec {
         match self.request_policy_profile {
             RequestPolicyProfile::Anthropic
             | RequestPolicyProfile::Gemini
+            | RequestPolicyProfile::Grok
             | RequestPolicyProfile::Kimi
             | RequestPolicyProfile::ZAi
             | RequestPolicyProfile::Sakura
@@ -163,6 +166,8 @@ pub fn openai_compatible_spec_for_base_url(base_url: &str) -> ProviderSpec {
     let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
     if normalized.contains("moonshot.ai") {
         kimi::spec()
+    } else if normalized.contains("api.x.ai") || normalized.contains(".api.x.ai") {
+        grok::spec()
     } else if normalized.contains("api.z.ai") {
         zai::spec()
     } else if normalized.contains("generativelanguage.googleapis.com") {
@@ -171,5 +176,22 @@ pub fn openai_compatible_spec_for_base_url(base_url: &str) -> ProviderSpec {
         sakura::spec()
     } else {
         openai::spec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{grok, openai, openai_compatible_spec_for_base_url};
+
+    #[test]
+    fn maps_xai_base_url_to_grok_spec() {
+        let spec = openai_compatible_spec_for_base_url("https://api.x.ai/v1");
+        assert_eq!(spec.name, grok::spec().name);
+    }
+
+    #[test]
+    fn keeps_unknown_openai_compatible_as_openai() {
+        let spec = openai_compatible_spec_for_base_url("https://api.openai.com/v1");
+        assert_eq!(spec.name, openai::spec().name);
     }
 }

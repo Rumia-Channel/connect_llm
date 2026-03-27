@@ -50,8 +50,7 @@ pub(crate) fn capture_debug_json<T: Serialize>(label: &str, value: &T) -> Option
     }
 
     let body = serde_json::to_string_pretty(value).ok()?;
-    debug_log(label, &body);
-    Some(body)
+    Some(format!("[connect_llm debug] {}\n{}", label, body))
 }
 
 pub(crate) fn capture_debug_text(label: &str, body: impl Into<String>) -> Option<String> {
@@ -60,8 +59,7 @@ pub(crate) fn capture_debug_text(label: &str, body: impl Into<String>) -> Option
     }
 
     let body = body.into();
-    debug_log(label, &body);
-    Some(body)
+    Some(format!("[connect_llm debug] {}\n{}", label, body))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,6 +406,7 @@ pub enum AiProvider {
     GitHubCopilot,
     GoogleAiStudio,
     Gemini,
+    Grok,
     OpenAi,
     OpenAiCodex,
     Sakura,
@@ -424,6 +423,7 @@ impl AiProvider {
             AiProvider::GitHubCopilot => providers::github_copilot::spec(),
             AiProvider::GoogleAiStudio => providers::google_ai_studio::spec(),
             AiProvider::Gemini => providers::gemini::spec(),
+            AiProvider::Grok => providers::grok::spec(),
             AiProvider::OpenAi => providers::openai::spec(),
             AiProvider::OpenAiCodex => providers::openai_codex::spec(),
             AiProvider::Sakura => providers::sakura::spec(),
@@ -439,14 +439,15 @@ impl AiProvider {
             0 => AiProvider::Sakura,
             1 => AiProvider::Anthropic,
             2 => AiProvider::GitHubCopilot,
-            3 => AiProvider::OpenAi,
-            4 => AiProvider::OpenAiCodex,
-            5 => AiProvider::Kimi,
-            6 => AiProvider::KimiCoding,
-            7 => AiProvider::ZAi,
-            8 => AiProvider::ZAiCoding,
-            9 => AiProvider::GoogleAiStudio,
-            10 => AiProvider::Gemini,
+            3 => AiProvider::Grok,
+            4 => AiProvider::OpenAi,
+            5 => AiProvider::OpenAiCodex,
+            6 => AiProvider::Kimi,
+            7 => AiProvider::KimiCoding,
+            8 => AiProvider::ZAi,
+            9 => AiProvider::ZAiCoding,
+            10 => AiProvider::GoogleAiStudio,
+            11 => AiProvider::Gemini,
             _ => AiProvider::Sakura,
         }
     }
@@ -456,14 +457,15 @@ impl AiProvider {
             AiProvider::Sakura => 0,
             AiProvider::Anthropic => 1,
             AiProvider::GitHubCopilot => 2,
-            AiProvider::OpenAi => 3,
-            AiProvider::OpenAiCodex => 4,
-            AiProvider::Kimi => 5,
-            AiProvider::KimiCoding => 6,
-            AiProvider::ZAi => 7,
-            AiProvider::ZAiCoding => 8,
-            AiProvider::GoogleAiStudio => 9,
-            AiProvider::Gemini => 10,
+            AiProvider::Grok => 3,
+            AiProvider::OpenAi => 4,
+            AiProvider::OpenAiCodex => 5,
+            AiProvider::Kimi => 6,
+            AiProvider::KimiCoding => 7,
+            AiProvider::ZAi => 8,
+            AiProvider::ZAiCoding => 9,
+            AiProvider::GoogleAiStudio => 10,
+            AiProvider::Gemini => 11,
         }
     }
 
@@ -473,6 +475,7 @@ impl AiProvider {
             "GitHubCopilot" | "GitHub Copilot" | "Copilot" => AiProvider::GitHubCopilot,
             "GoogleAiStudio" | "Google AI Studio" => AiProvider::GoogleAiStudio,
             "Gemini" => AiProvider::Gemini,
+            "Grok" | "xAI" | "XAI" | "X Grok" => AiProvider::Grok,
             "OpenAi" | "OpenAI" => AiProvider::OpenAi,
             "OpenAiCodex" | "OpenAI Codex" | "Codex" => AiProvider::OpenAiCodex,
             "Sakura" => AiProvider::Sakura,

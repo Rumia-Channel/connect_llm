@@ -405,6 +405,7 @@ let thinking = ThinkingConfig {
 | `AiProvider::GitHubCopilot` | OpenAI-compatible (Copilot) | Yes | Yes | Yes |
 | `AiProvider::GoogleAiStudio` | OpenAI-compatible | No | Yes | Yes |
 | `AiProvider::Gemini` | Gemini native | Yes | Yes | Yes |
+| `AiProvider::Grok` | OpenAI-compatible (xAI) | No | No | Yes |
 | `AiProvider::OpenAi` | OpenAI-compatible | No | No | Yes |
 | `AiProvider::OpenAiCodex` | ChatGPT Codex backend | Yes | Yes | Yes |
 | `AiProvider::Sakura` | OpenAI-compatible | Yes | No | Yes |
@@ -437,6 +438,9 @@ println!("{}", provider.supports_tools());
 
 - `AiProvider::GoogleAiStudio` は `https://generativelanguage.googleapis.com/v1beta/openai` の OpenAI compatibility を使います。
 - `AiProvider::Gemini` は `generateContent` / `streamGenerateContent` を使う native Gemini API です。
+- `AiProvider::Grok` は `https://api.x.ai/v1` の OpenAI compatibility を使います。
+- `AiProvider::Grok` の default model は `grok-4` です。`list_models()` が使える場合は `grok-4-1-fast-reasoning` や `grok-code-fast-1` などへ切り替えられます。
+- `AiProvider::Grok` は Tool Use を使えますが、thinking の request-side 設定は送っていません。モデルによっては stream 時に `reasoning_content` が返ることがあります。
 - `AiProvider::GitHubCopilot` は `chat/completions` を使う Copilot の OpenAI-compatible endpoint を叩きます。
 - `AiProvider::GitHubCopilot` は request header に `Openai-Intent: conversation-edits` と `x-initiator` を付けます。ここは `opencode` の実装に合わせています。
 - `AiProvider::GitHubCopilot` の `api_key` は GitHub token として扱い、内部で Copilot API token に交換します。

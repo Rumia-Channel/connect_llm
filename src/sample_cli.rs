@@ -2,7 +2,9 @@ mod io;
 mod settings;
 mod streaming;
 
-use self::io::{print_thinking, print_tool_calls, prompt, prompt_default, prompt_multiline};
+use self::io::{
+    print_debug_trace, print_thinking, print_tool_calls, prompt, prompt_default, prompt_multiline,
+};
 use self::settings::{
     build_thinking_config, describe_codex_effort, ensure_provider_auth_ready, parse_codex_effort,
     parse_debug_mode, parse_stream_mode, parse_thinking_toggle, sanitize_messages_for_request,
@@ -223,6 +225,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                     println!();
+                }
+                if debug_enabled {
+                    print_debug_trace(response.debug.as_ref());
                 }
 
                 messages.push(Message {

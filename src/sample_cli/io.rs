@@ -1,4 +1,4 @@
-use connect_llm::{ThinkingOutput, ToolCall};
+use connect_llm::{DebugTrace, ThinkingOutput, ToolCall};
 use crossterm::{
     cursor::{MoveToColumn, MoveUp},
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -30,6 +30,19 @@ pub(crate) fn print_tool_calls(tool_calls: &[ToolCall]) {
 
     for tool_call in tool_calls {
         println!("tool call> {} {}", tool_call.name, tool_call.arguments);
+    }
+}
+
+pub(crate) fn print_debug_trace(debug: Option<&DebugTrace>) {
+    let Some(debug) = debug else {
+        return;
+    };
+
+    if let Some(request) = &debug.request {
+        eprintln!("{}", request.trim_end());
+    }
+    if let Some(response) = &debug.response {
+        eprintln!("{}", response.trim_end());
     }
 }
 
