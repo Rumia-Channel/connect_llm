@@ -2,8 +2,10 @@
 
 pub mod anthropic;
 pub mod openai;
+pub mod providers;
 
 use futures_util::stream::BoxStream;
+use providers::{ApiStyle, ProviderSpec};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -154,6 +156,18 @@ pub enum AiProvider {
 }
 
 impl AiProvider {
+    fn spec(&self) -> ProviderSpec {
+        match self {
+            AiProvider::Anthropic => providers::anthropic::spec(),
+            AiProvider::OpenAi => providers::openai::spec(),
+            AiProvider::Sakura => providers::sakura::spec(),
+            AiProvider::Kimi => providers::kimi::spec(),
+            AiProvider::KimiCoding => providers::kimi_coding::spec(),
+            AiProvider::ZAi => providers::zai::spec(),
+            AiProvider::ZAiCoding => providers::zai_coding::spec(),
+        }
+    }
+
     pub fn from_index(index: i32) -> Self {
         match index {
             0 => AiProvider::Sakura,
@@ -193,76 +207,31 @@ impl AiProvider {
     }
 
     pub fn name(&self) -> &'static str {
-        match self {
-            AiProvider::Sakura => "Sakura",
-            AiProvider::Anthropic => "Anthropic",
-            AiProvider::OpenAi => "OpenAi",
-            AiProvider::Kimi => "Kimi",
-            AiProvider::KimiCoding => "KimiCoding",
-            AiProvider::ZAi => "ZAi",
-            AiProvider::ZAiCoding => "ZAiCoding",
-        }
+        self.spec().name
     }
 
     pub fn default_base_url(&self) -> &'static str {
-        match self {
-            AiProvider::Anthropic => "https://api.anthropic.com",
-            AiProvider::OpenAi => "https://api.openai.com",
-            AiProvider::Sakura => "https://api.ai.sakura.ad.jp",
-            AiProvider::Kimi => "https://api.moonshot.ai",
-            AiProvider::KimiCoding => "https://api.kimi.com/coding",
-            AiProvider::ZAi => "https://api.z.ai/api/paas/v4",
-            AiProvider::ZAiCoding => "https://api.z.ai/api/coding/paas/v4",
-        }
+        self.spec().default_base_url
     }
 
     pub fn create_client(&self, config: AiConfig) -> Arc<dyn AiClient> {
-        match self {
-            AiProvider::Anthropic | AiProvider::KimiCoding => {
+        match self.spec().api_style {
+            ApiStyle::Anthropic => {
                 Arc::new(anthropic::AnthropicClient::new(config)) as Arc<dyn AiClient>
             }
-            AiProvider::OpenAi
-            | AiProvider::Sakura
-            | AiProvider::Kimi
-            | AiProvider::ZAi
-            | AiProvider::ZAiCoding => {
-                Arc::new(openai::OpenAiClient::new(config)) as Arc<dyn AiClient>
-            }
+            ApiStyle::OpenAi => Arc::new(openai::OpenAiClient::new(config)) as Arc<dyn AiClient>,
         }
     }
 
     pub fn default_model(&self) -> &'static str {
-        match self {
-            AiProvider::Anthropic => "claude-3-5-sonnet-20241022",
-            AiProvider::OpenAi => "gpt-4o",
-            AiProvider::Sakura => "preview/Kimi-K2.5",
-            AiProvider::Kimi => "kimi-k2.5",
-            AiProvider::KimiCoding => "kimi-for-coding",
-            AiProvider::ZAi => "glm-5",
-            AiProvider::ZAiCoding => "glm-4.7",
-        }
+        self.spec().default_model
     }
 
     pub fn supports_thinking_output(&self) -> bool {
-        match self {
-            AiProvider::OpenAi => false,
-            AiProvider::Anthropic
-            | AiProvider::Sakura
-            | AiProvider::Kimi
-            | AiProvider::KimiCoding
-            | AiProvider::ZAi
-            | AiProvider::ZAiCoding => true,
-        }
+        self.spec().supports_thinking_output
     }
 
     pub fn supports_thinking_config(&self) -> bool {
-        match self {
-            AiProvider::Anthropic
-            | AiProvider::Kimi
-            | AiProvider::KimiCoding
-            | AiProvider::ZAi
-            | AiProvider::ZAiCoding => true,
-            AiProvider::OpenAi | AiProvider::Sakura => false,
-        }
+        self.spec().supports_thinking_config
     }
 }
