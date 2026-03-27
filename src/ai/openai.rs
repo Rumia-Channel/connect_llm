@@ -1,21 +1,18 @@
 #![allow(dead_code)]
 
+mod convert;
 mod protocol;
 
 use self::protocol::{
-    ModelsResponse, OpenAiExtraBody, OpenAiFunctionDefinition, OpenAiGoogleExtraBody,
-    OpenAiGoogleThinkingConfig, OpenAiMessage, OpenAiRequest, OpenAiResponse, OpenAiStreamResponse,
-    OpenAiThinkingRequest, OpenAiToolCall, OpenAiToolDefinition, OpenAiToolFunction,
-    api_error_from_response, convert_tool_call_deltas, convert_tool_calls_to_response,
+    ModelsResponse, OpenAiResponse, OpenAiStreamResponse, api_error_from_response,
+    convert_tool_call_deltas,
 };
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    ThinkingConfig, ThinkingOutput, ToolCall, ToolChoice, ToolDefinition, Usage,
-    capture_debug_json, capture_debug_text, serialize_tool_arguments,
+    capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
-use serde_json::{Value, json};
 pub struct OpenAiClient {
     client: Client,
     config: AiConfig,
@@ -28,262 +25,13 @@ impl OpenAiClient {
             config,
         }
     }
-
-    fn normalized_base_url(base_url: &str) -> &str {
-        base_url.trim_end_matches('/')
-    }
-
-    fn chat_completions_url(base_url: &str) -> String {
-        let base_url = Self::normalized_base_url(base_url);
-        if base_url.ends_with("/v1")
-            || base_url.contains("/paas/v4")
-            || base_url.ends_with("/openai")
-        {
-            format!("{}/chat/completions", base_url)
-        } else {
-            format!("{}/v1/chat/completions", base_url)
-        }
-    }
-
-    fn models_url(base_url: &str) -> String {
-        let base_url = Self::normalized_base_url(base_url);
-        if base_url.ends_with("/v1")
-            || base_url.contains("/paas/v4")
-            || base_url.ends_with("/openai")
-        {
-            format!("{}/models", base_url)
-        } else {
-            format!("{}/v1/models", base_url)
-        }
-    }
-
-    fn supports_reasoning_config(base_url: &str) -> bool {
-        let base_url = Self::normalized_base_url(base_url);
-        base_url.contains("api.moonshot.ai") || base_url.contains("api.z.ai")
-    }
-
-    fn is_google_openai_compat(base_url: &str) -> bool {
-        Self::normalized_base_url(base_url).contains("generativelanguage.googleapis.com")
-    }
-
-    fn convert_thinking_config(
-        base_url: &str,
-        thinking: Option<&ThinkingConfig>,
-    ) -> Option<OpenAiThinkingRequest> {
-        let thinking = thinking?;
-        if !Self::supports_reasoning_config(base_url) {
-            return None;
-        }
-
-        Some(OpenAiThinkingRequest {
-            thinking_type: if thinking.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            },
-            clear_thinking: if base_url.contains("api.z.ai") {
-                thinking.clear_history
-            } else {
-                None
-            },
-        })
-    }
-
-    fn convert_google_extra_body(
-        base_url: &str,
-        thinking: Option<&ThinkingConfig>,
-    ) -> Option<OpenAiExtraBody> {
-        let thinking = thinking?;
-        if !thinking.enabled || !Self::is_google_openai_compat(base_url) {
-            return None;
-        }
-
-        Some(OpenAiExtraBody {
-            google: OpenAiGoogleExtraBody {
-                thinking_config: OpenAiGoogleThinkingConfig {
-                    include_thoughts: true,
-                    thinking_budget: thinking.budget_tokens,
-                },
-            },
-        })
-    }
-
-    fn convert_tools(tools: &[ToolDefinition]) -> Option<Vec<OpenAiToolDefinition>> {
-        if tools.is_empty() {
-            return None;
-        }
-
-        Some(
-            tools
-                .iter()
-                .map(|tool| OpenAiToolDefinition {
-                    tool_type: "function",
-                    function: OpenAiFunctionDefinition {
-                        name: tool.name.clone(),
-                        description: tool.description.clone(),
-                        parameters: tool.input_schema.clone(),
-                    },
-                })
-                .collect(),
-        )
-    }
-
-    fn convert_tool_choice(choice: Option<&ToolChoice>) -> Option<Value> {
-        match choice? {
-            ToolChoice::Auto => Some(json!("auto")),
-            ToolChoice::None => Some(json!("none")),
-            ToolChoice::Required => Some(json!("required")),
-            ToolChoice::Tool(name) => Some(json!({
-                "type": "function",
-                "function": {
-                    "name": name,
-                }
-            })),
-        }
-    }
-
-    fn convert_tool_calls(tool_calls: Vec<ToolCall>) -> Option<Vec<OpenAiToolCall>> {
-        if tool_calls.is_empty() {
-            return None;
-        }
-
-        Some(
-            tool_calls
-                .into_iter()
-                .map(|tool_call| OpenAiToolCall {
-                    id: tool_call.id,
-                    call_type: "function".to_string(),
-                    function: OpenAiToolFunction {
-                        name: tool_call.name,
-                        arguments: serialize_tool_arguments(&tool_call.arguments),
-                    },
-                })
-                .collect(),
-        )
-    }
-
-    fn convert_request(request: ChatRequest, base_url: &str, stream: bool) -> OpenAiRequest {
-        let ChatRequest {
-            model,
-            messages: request_messages,
-            tools,
-            tool_choice,
-            max_tokens,
-            temperature,
-            system,
-            thinking,
-        } = request;
-
-        let mut messages = Vec::new();
-
-        if let Some(system) = system {
-            messages.push(OpenAiMessage {
-                role: "system".to_string(),
-                content: Some(system),
-                reasoning_content: None,
-                tool_call_id: None,
-                tool_calls: None,
-            });
-        }
-
-        for message in request_messages {
-            let super::Message {
-                role,
-                content,
-                thinking,
-                tool_calls,
-                tool_call_id,
-                tool_name: _,
-                tool_result: _,
-                tool_error: _,
-            } = message;
-            let reasoning_content = thinking.and_then(|thinking| thinking.text);
-            messages.push(OpenAiMessage {
-                role,
-                content: if content.is_empty() && !tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(content)
-                },
-                reasoning_content,
-                tool_call_id,
-                tool_calls: Self::convert_tool_calls(tool_calls),
-            });
-        }
-
-        OpenAiRequest {
-            model,
-            messages,
-            tools: Self::convert_tools(&tools),
-            tool_choice: Self::convert_tool_choice(tool_choice.as_ref()),
-            max_tokens,
-            temperature,
-            thinking: Self::convert_thinking_config(base_url, thinking.as_ref()),
-            extra_body: Self::convert_google_extra_body(base_url, thinking.as_ref()),
-            stream,
-        }
-    }
-
-    fn convert_response(
-        response: OpenAiResponse,
-        request_debug: Option<String>,
-        response_debug: Option<String>,
-    ) -> ChatResponse {
-        let tool_calls = response
-            .choices
-            .first()
-            .map(|choice| convert_tool_calls_to_response(choice.message.tool_calls.clone()))
-            .unwrap_or_default();
-        let thinking = response
-            .choices
-            .first()
-            .and_then(|choice| {
-                choice
-                    .message
-                    .reasoning_content
-                    .clone()
-                    .or_else(|| choice.message.reasoning.clone())
-            })
-            .map(|text| ThinkingOutput {
-                text: Some(text),
-                signature: None,
-                redacted: None,
-            });
-
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|choice| choice.message.content)
-            .unwrap_or_default();
-
-        ChatResponse {
-            id: response.id,
-            content,
-            model: response.model,
-            usage: Usage {
-                input_tokens: response.usage.prompt_tokens,
-                output_tokens: response.usage.completion_tokens,
-            },
-            thinking,
-            tool_calls,
-            debug: if request_debug.is_some() || response_debug.is_some() {
-                Some(DebugTrace {
-                    request: request_debug,
-                    response: response_debug,
-                })
-            } else {
-                None
-            },
-        }
-    }
 }
 
 #[async_trait::async_trait]
 impl AiClient for OpenAiClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
-        let url = Self::chat_completions_url(&self.config.base_url);
-        let openai_request = Self::convert_request(request, &self.config.base_url, false);
+        let url = convert::chat_completions_url(&self.config.base_url);
+        let openai_request = convert::convert_request(request, &self.config.base_url, false);
         let request_debug =
             capture_debug_json(&format!("openai request POST {}", url), &openai_request);
 
@@ -317,7 +65,7 @@ impl AiClient for OpenAiClient {
         let openai_response: OpenAiResponse =
             serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
 
-        Ok(Self::convert_response(
+        Ok(convert::convert_response(
             openai_response,
             request_debug,
             response_debug,
@@ -328,8 +76,8 @@ impl AiClient for OpenAiClient {
         &self,
         request: ChatRequest,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
-        let url = Self::chat_completions_url(&self.config.base_url);
-        let openai_request = Self::convert_request(request, &self.config.base_url, true);
+        let url = convert::chat_completions_url(&self.config.base_url);
+        let openai_request = convert::convert_request(request, &self.config.base_url, true);
         let api_key = self.config.api_key.clone();
         let base_url = self.config.base_url.clone();
         let request_debug = capture_debug_json(
@@ -481,7 +229,7 @@ impl AiClient for OpenAiClient {
 }
 
 pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, AiError> {
-    let url = OpenAiClient::models_url(base_url);
+    let url = convert::models_url(base_url);
     let response = reqwest::Client::new()
         .get(&url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -525,7 +273,7 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, A
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiClient,
+        convert,
         protocol::{
             OpenAiChoice, OpenAiMessageResponse, OpenAiResponse, OpenAiToolCall,
             OpenAiToolFunction, OpenAiUsage,
@@ -560,7 +308,7 @@ mod tests {
         )];
         request.tool_choice = Some(ToolChoice::Auto);
 
-        let converted = OpenAiClient::convert_request(request, "https://api.openai.com", false);
+        let converted = convert::convert_request(request, "https://api.openai.com", false);
         assert_eq!(converted.tools.as_ref().map(Vec::len), Some(1));
         assert_eq!(converted.tool_choice, Some(json!("auto")));
         assert_eq!(
@@ -601,7 +349,7 @@ mod tests {
             },
         };
 
-        let converted = OpenAiClient::convert_response(response, None, None);
+        let converted = convert::convert_response(response, None, None);
         assert_eq!(converted.tool_calls.len(), 1);
         assert_eq!(converted.tool_calls[0].name, "get_weather");
         assert_eq!(converted.tool_calls[0].arguments, json!({"city": "Tokyo"}));

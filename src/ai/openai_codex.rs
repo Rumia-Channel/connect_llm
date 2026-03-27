@@ -3,14 +3,14 @@
 mod auth;
 mod convert;
 mod protocol;
+mod streaming;
 
 use self::protocol::{
-    OpenAiCodexEvent, OpenAiCodexRequest, OpenAiCodexResponse, PendingToolCallState,
-    api_error_from_response,
+    OpenAiCodexRequest, OpenAiCodexResponse, PendingToolCallState, api_error_from_response,
 };
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    ThinkingOutput, ToolCallDelta, capture_debug_json, capture_debug_text,
+    capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -86,106 +86,20 @@ impl AiClient for OpenAiCodexClient {
             return Err(api_error_from_response(status, &body));
         }
 
-        let mut content = String::new();
-        let mut thinking_text = String::new();
-        let mut thinking_signature: Option<String> = None;
-        let mut pending_tool_calls: HashMap<usize, PendingToolCallState> = HashMap::new();
-        let mut final_response: Option<OpenAiCodexResponse> = None;
-
-        for raw_line in body.lines() {
-            let line = raw_line.trim();
-            if line.is_empty() || !line.starts_with("data: ") {
-                continue;
-            }
-
-            let data = &line[6..];
-            if data == "[DONE]" {
-                break;
-            }
-
-            let event: OpenAiCodexEvent =
-                serde_json::from_str(data).map_err(|error| AiError::Parse(error.to_string()))?;
-
-            match event.event_type.as_str() {
-                "response.output_text.delta" => {
-                    if let Some(delta) = event.delta {
-                        content.push_str(&delta);
-                    }
-                }
-                "response.reasoning_summary_text.delta" => {
-                    if let Some(delta) = event.delta {
-                        thinking_text.push_str(&delta);
-                    }
-                }
-                "response.output_item.added" => {
-                    if let (Some(output_index), Some(item)) = (event.output_index, event.item) {
-                        if item.item_type == "function_call" {
-                            let pending = pending_tool_calls.entry(output_index).or_default();
-                            if let Some(call_id) = item.call_id.or(item.id) {
-                                pending.id = Some(call_id);
-                            }
-                            if let Some(name) = item.name {
-                                pending.name = Some(name);
-                            }
-                        } else if item.item_type == "reasoning" && thinking_signature.is_none() {
-                            thinking_signature = item.encrypted_content;
-                        }
-                    }
-                }
-                "response.output_item.done" => {
-                    if let (Some(output_index), Some(item)) = (event.output_index, event.item) {
-                        if item.item_type == "function_call" {
-                            let pending = pending_tool_calls.entry(output_index).or_default();
-                            if let Some(call_id) = item.call_id.or(item.id) {
-                                pending.id = Some(call_id);
-                            }
-                            if let Some(name) = item.name {
-                                pending.name = Some(name);
-                            }
-                            if !pending.saw_argument_delta {
-                                if let Some(arguments) = item.arguments {
-                                    pending.arguments = arguments;
-                                }
-                            }
-                        } else if item.item_type == "reasoning" && thinking_signature.is_none() {
-                            thinking_signature = item.encrypted_content;
-                        }
-                    }
-                }
-                "response.function_call_arguments.delta" => {
-                    if let (Some(output_index), Some(delta)) = (event.output_index, event.delta) {
-                        let pending = pending_tool_calls.entry(output_index).or_default();
-                        pending.saw_argument_delta = true;
-                        pending.arguments.push_str(&delta);
-                    }
-                }
-                "response.completed" => {
-                    final_response = event.response;
-                }
-                _ => {}
-            }
+        let parsed = streaming::parse_response_body(&body)?;
+        let mut response =
+            convert::convert_response(parsed.response, request_debug, response_debug);
+        if response.content.is_empty() && !parsed.content.is_empty() {
+            response.content = parsed.content;
         }
-
-        let response = final_response.ok_or_else(|| {
-            AiError::Parse("missing response.completed event in Codex stream".to_string())
-        })?;
-        let mut response = convert::convert_response(response, request_debug, response_debug);
-        if response.content.is_empty() && !content.is_empty() {
-            response.content = content;
-        }
-        if response.thinking.is_none() && !thinking_text.is_empty() {
-            response.thinking = Some(ThinkingOutput {
-                text: Some(thinking_text),
-                signature: thinking_signature.clone(),
-                redacted: None,
-            });
-        } else if let Some(thinking) = response.thinking.as_mut() {
-            if thinking.signature.is_none() {
-                thinking.signature = thinking_signature;
-            }
-        }
+        streaming::finalize_response_thinking(
+            &mut response.thinking,
+            parsed.thinking_text,
+            parsed.thinking_signature,
+        );
         if response.tool_calls.is_empty() {
-            response.tool_calls = pending_tool_calls
+            response.tool_calls = parsed
+                .pending_tool_calls
                 .into_iter()
                 .filter_map(|(index, pending)| pending.into_tool_call(index))
                 .collect();
@@ -272,256 +186,23 @@ impl AiClient for OpenAiCodexClient {
                     let line = buffer[..pos].to_string();
                     buffer = buffer[pos + 1..].to_string();
 
-                    let line = line.trim();
-                    if line.is_empty() || !line.starts_with("data: ") {
-                        continue;
-                    }
-
-                    let data = &line[6..];
-                    let response_debug =
-                        capture_debug_text("openai_codex stream sse", line.to_string());
-                    if data == "[DONE]" {
-                        yield Ok(StreamChunk {
-                            delta: String::new(),
-                            thinking_delta: None,
-                            thinking_signature: None,
-                            tool_call_deltas: Vec::new(),
-                            done: true,
-                            debug: if request_debug.is_some() || response_debug.is_some() {
-                                Some(DebugTrace {
-                                    request: request_debug.take(),
-                                    response: response_debug,
-                                })
-                            } else {
-                                None
-                            },
-                        });
-                        return;
-                    }
-
-                    let event: OpenAiCodexEvent = match serde_json::from_str(data) {
-                        Ok(event) => event,
-                        Err(_) => continue,
-                    };
-
-                    match event.event_type.as_str() {
-                        "response.output_text.delta" => {
-                            let delta = event.delta.unwrap_or_default();
-                            if delta.is_empty() {
-                                continue;
-                            }
-                            yield Ok(StreamChunk {
-                                delta,
-                                thinking_delta: None,
-                                thinking_signature: None,
-                                tool_call_deltas: Vec::new(),
-                                done: false,
-                                debug: if request_debug.is_some() || response_debug.is_some() {
-                                    Some(DebugTrace {
-                                        request: request_debug.take(),
-                                        response: response_debug.clone(),
-                                    })
-                                } else {
-                                    None
-                                },
-                            });
-                        }
-                        "response.output_item.added" => {
-                            let Some(output_index) = event.output_index else {
-                                continue;
-                            };
-                            let Some(item) = event.item else {
-                                continue;
-                            };
-                            if item.item_type != "function_call" {
-                                continue;
-                            }
-
-                            let pending = pending_tool_calls.entry(output_index).or_default();
-                            let id = item.call_id.or(item.id);
-                            let name = item.name;
-                            if let Some(id_value) = &id {
-                                pending.id = Some(id_value.clone());
-                            }
-                            if let Some(name_value) = &name {
-                                pending.name = Some(name_value.clone());
-                            }
-
-                            if id.is_none() && name.is_none() {
-                                continue;
-                            }
-
-                            yield Ok(StreamChunk {
-                                delta: String::new(),
-                                thinking_delta: None,
-                                thinking_signature: None,
-                                tool_call_deltas: vec![ToolCallDelta {
-                                    index: output_index,
-                                    id,
-                                    name,
-                                    arguments: None,
-                                }],
-                                done: false,
-                                debug: if request_debug.is_some() || response_debug.is_some() {
-                                    Some(DebugTrace {
-                                        request: request_debug.take(),
-                                        response: response_debug.clone(),
-                                    })
-                                } else {
-                                    None
-                                },
-                            });
-                        }
-                        "response.function_call_arguments.delta" => {
-                            let Some(output_index) = event.output_index else {
-                                continue;
-                            };
-                            let Some(arguments) = event.delta else {
-                                continue;
-                            };
-
-                            let pending = pending_tool_calls.entry(output_index).or_default();
-                            pending.saw_argument_delta = true;
-                            pending.arguments.push_str(&arguments);
-
-                            yield Ok(StreamChunk {
-                                delta: String::new(),
-                                thinking_delta: None,
-                                thinking_signature: None,
-                                tool_call_deltas: vec![ToolCallDelta {
-                                    index: output_index,
-                                    id: None,
-                                    name: None,
-                                    arguments: Some(arguments),
-                                }],
-                                done: false,
-                                debug: if request_debug.is_some() || response_debug.is_some() {
-                                    Some(DebugTrace {
-                                        request: request_debug.take(),
-                                        response: response_debug.clone(),
-                                    })
-                                } else {
-                                    None
-                                },
-                            });
-                        }
-                        "response.output_item.done" => {
-                            let Some(output_index) = event.output_index else {
-                                continue;
-                            };
-                            let Some(item) = event.item else {
-                                continue;
-                            };
-
-                            if item.item_type == "reasoning" {
-                                if let Some(signature) = item.encrypted_content {
-                                    yield Ok(StreamChunk {
-                                        delta: String::new(),
-                                        thinking_delta: None,
-                                        thinking_signature: Some(signature),
-                                        tool_call_deltas: Vec::new(),
-                                        done: false,
-                                        debug: if request_debug.is_some() || response_debug.is_some() {
-                                            Some(DebugTrace {
-                                                request: request_debug.take(),
-                                                response: response_debug.clone(),
-                                            })
-                                        } else {
-                                            None
-                                        },
-                                    });
-                                }
-                                continue;
-                            }
-
-                            if item.item_type != "function_call" {
-                                continue;
-                            }
-
-                            let pending = pending_tool_calls.entry(output_index).or_default();
-                            let id = item.call_id.or(item.id);
-                            let name = item.name;
-                            let arguments = if pending.saw_argument_delta {
-                                None
-                            } else {
-                                item.arguments
-                            };
-
-                            if let Some(id_value) = &id {
-                                pending.id = Some(id_value.clone());
-                            }
-                            if let Some(name_value) = &name {
-                                pending.name = Some(name_value.clone());
-                            }
-                            if let Some(arguments_value) = &arguments {
-                                pending.arguments = arguments_value.clone();
-                            }
-
-                            if id.is_none() && name.is_none() && arguments.is_none() {
-                                continue;
-                            }
-
-                            yield Ok(StreamChunk {
-                                delta: String::new(),
-                                thinking_delta: None,
-                                thinking_signature: None,
-                                tool_call_deltas: vec![ToolCallDelta {
-                                    index: output_index,
-                                    id,
-                                    name,
-                                    arguments,
-                                }],
-                                done: false,
-                                debug: if request_debug.is_some() || response_debug.is_some() {
-                                    Some(DebugTrace {
-                                        request: request_debug.take(),
-                                        response: response_debug.clone(),
-                                    })
-                                } else {
-                                    None
-                                },
-                            });
-                        }
-                        "response.reasoning_summary_text.delta" => {
-                            let thinking_delta = event.delta.or(event.text);
-                            if thinking_delta.is_none() {
-                                continue;
-                            }
-                            yield Ok(StreamChunk {
-                                delta: String::new(),
-                                thinking_delta,
-                                thinking_signature: None,
-                                tool_call_deltas: Vec::new(),
-                                done: false,
-                                debug: if request_debug.is_some() || response_debug.is_some() {
-                                    Some(DebugTrace {
-                                        request: request_debug.take(),
-                                        response: response_debug.clone(),
-                                    })
-                                } else {
-                                    None
-                                },
-                            });
-                        }
-                        "response.completed" => {
-                            yield Ok(StreamChunk {
-                                delta: String::new(),
-                                thinking_delta: None,
-                                thinking_signature: None,
-                                tool_call_deltas: Vec::new(),
-                                done: true,
-                                debug: if request_debug.is_some() || response_debug.is_some() {
-                                    Some(DebugTrace {
-                                        request: request_debug.take(),
-                                        response: response_debug,
-                                    })
-                                } else {
-                                    None
-                                },
-                            });
+                    let chunk = match streaming::parse_stream_line(
+                        &line,
+                        &mut request_debug,
+                        &mut pending_tool_calls,
+                    ) {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            yield Err(error);
                             return;
                         }
-                        _ => {}
+                    };
+
+                    let done = chunk.done;
+                    yield Ok(chunk);
+                    if done {
+                        return;
                     }
                 }
             }

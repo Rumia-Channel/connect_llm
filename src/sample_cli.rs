@@ -172,7 +172,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             messages: request_messages,
             tools: Vec::new(),
             tool_choice: None,
-            max_tokens: Some(4096),
+            max_tokens: None,
             temperature: None,
             system: None,
             thinking: build_thinking_config(provider, thinking_enabled, codex_effort),

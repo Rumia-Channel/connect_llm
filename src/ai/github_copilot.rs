@@ -1,23 +1,20 @@
 #![allow(dead_code)]
 
 mod auth;
+mod convert;
 mod protocol;
 
 use self::protocol::{
-    GitHubCopilotFunctionDefinition, GitHubCopilotMessage, GitHubCopilotRequest,
-    GitHubCopilotResponse, GitHubCopilotStreamResponse, GitHubCopilotToolCall,
-    GitHubCopilotToolDefinition, GitHubCopilotToolFunction, api_error_from_response,
-    parse_tool_call_deltas, parse_tool_calls,
+    GitHubCopilotResponse, GitHubCopilotStreamResponse, api_error_from_response,
+    parse_tool_call_deltas,
 };
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    ThinkingEffort, ThinkingOutput, ToolCall, ToolChoice, ToolDefinition, Usage,
-    capture_debug_json, capture_debug_text, serialize_tool_arguments,
+    capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::{Value, json};
 
 pub use self::auth::{
     GitHubCopilotDeviceAuth, GitHubCopilotDeviceAuthOptions, github_copilot_auth_path,
@@ -51,236 +48,15 @@ impl GitHubCopilotClient {
             config,
         }
     }
-
-    fn normalized_base_url(base_url: &str) -> &str {
-        base_url.trim_end_matches('/')
-    }
-
-    fn chat_completions_url(base_url: &str) -> String {
-        let base_url = Self::normalized_base_url(base_url);
-        if base_url.ends_with("/v1") {
-            format!("{}/chat/completions", base_url)
-        } else {
-            format!("{}/chat/completions", base_url)
-        }
-    }
-
-    fn models_url(base_url: &str) -> String {
-        let base_url = Self::normalized_base_url(base_url);
-        if base_url.ends_with("/v1") {
-            format!("{}/models", base_url)
-        } else {
-            format!("{}/models", base_url)
-        }
-    }
-
-    fn convert_effort(effort: ThinkingEffort) -> &'static str {
-        match effort {
-            ThinkingEffort::Minimal => "minimal",
-            ThinkingEffort::Low => "low",
-            ThinkingEffort::Medium => "medium",
-            ThinkingEffort::High => "high",
-            ThinkingEffort::XHigh => "xhigh",
-        }
-    }
-
-    fn initiator_for_messages(messages: &[GitHubCopilotMessage]) -> &'static str {
-        if messages
-            .last()
-            .map(|message| message.role.as_str() != "user")
-            .unwrap_or(false)
-        {
-            "agent"
-        } else {
-            "user"
-        }
-    }
-
-    fn convert_tools(tools: &[ToolDefinition]) -> Option<Vec<GitHubCopilotToolDefinition>> {
-        if tools.is_empty() {
-            return None;
-        }
-
-        Some(
-            tools
-                .iter()
-                .map(|tool| GitHubCopilotToolDefinition {
-                    tool_type: "function",
-                    function: GitHubCopilotFunctionDefinition {
-                        name: tool.name.clone(),
-                        description: tool.description.clone(),
-                        parameters: tool.input_schema.clone(),
-                    },
-                })
-                .collect(),
-        )
-    }
-
-    fn convert_tool_choice(choice: Option<&ToolChoice>) -> Option<Value> {
-        match choice? {
-            ToolChoice::Auto => Some(json!("auto")),
-            ToolChoice::None => Some(json!("none")),
-            ToolChoice::Required => Some(json!("required")),
-            ToolChoice::Tool(name) => Some(json!({
-                "type": "function",
-                "function": {
-                    "name": name,
-                }
-            })),
-        }
-    }
-
-    fn convert_tool_calls(tool_calls: Vec<ToolCall>) -> Option<Vec<GitHubCopilotToolCall>> {
-        if tool_calls.is_empty() {
-            return None;
-        }
-
-        Some(
-            tool_calls
-                .into_iter()
-                .map(|tool_call| GitHubCopilotToolCall {
-                    id: tool_call.id,
-                    call_type: "function".to_string(),
-                    function: GitHubCopilotToolFunction {
-                        name: tool_call.name,
-                        arguments: serialize_tool_arguments(&tool_call.arguments),
-                    },
-                })
-                .collect(),
-        )
-    }
-
-    fn convert_request(request: ChatRequest, stream: bool) -> GitHubCopilotRequest {
-        let ChatRequest {
-            model,
-            messages: request_messages,
-            tools,
-            tool_choice,
-            max_tokens,
-            temperature,
-            system,
-            thinking,
-        } = request;
-
-        let mut messages = Vec::new();
-
-        if let Some(system) = system {
-            messages.push(GitHubCopilotMessage {
-                role: "system".to_string(),
-                content: Some(system),
-                reasoning_text: None,
-                reasoning_opaque: None,
-                tool_call_id: None,
-                tool_calls: None,
-            });
-        }
-
-        for message in request_messages {
-            let super::Message {
-                role,
-                content,
-                thinking,
-                tool_calls,
-                tool_call_id,
-                tool_name: _,
-                tool_result: _,
-                tool_error: _,
-            } = message;
-
-            let (reasoning_text, reasoning_opaque) = match thinking {
-                Some(thinking) => (thinking.text, thinking.signature.or(thinking.redacted)),
-                None => (None, None),
-            };
-
-            let content = if role == "assistant" && content.is_empty() {
-                None
-            } else {
-                Some(content)
-            };
-
-            messages.push(GitHubCopilotMessage {
-                role,
-                content,
-                reasoning_text,
-                reasoning_opaque,
-                tool_call_id,
-                tool_calls: Self::convert_tool_calls(tool_calls),
-            });
-        }
-
-        let reasoning_effort = thinking
-            .as_ref()
-            .and_then(|thinking| thinking.effort)
-            .map(Self::convert_effort);
-        let thinking_budget = thinking
-            .as_ref()
-            .and_then(|thinking| thinking.enabled.then_some(thinking.budget_tokens))
-            .flatten();
-
-        GitHubCopilotRequest {
-            model,
-            messages,
-            tools: Self::convert_tools(&tools),
-            tool_choice: Self::convert_tool_choice(tool_choice.as_ref()),
-            max_tokens,
-            temperature,
-            reasoning_effort,
-            thinking_budget,
-            stream,
-        }
-    }
-
-    fn convert_response(
-        response: GitHubCopilotResponse,
-        request_debug: Option<String>,
-        response_debug: Option<String>,
-    ) -> ChatResponse {
-        let message = response.choices.first().map(|choice| &choice.message);
-        let content = message
-            .and_then(|message| message.content.clone())
-            .unwrap_or_default();
-        let thinking = message.and_then(|message| {
-            let thinking = ThinkingOutput {
-                text: message.reasoning_text.clone(),
-                signature: message.reasoning_opaque.clone(),
-                redacted: None,
-            };
-            (!thinking.is_empty()).then_some(thinking)
-        });
-        let tool_calls = message
-            .map(|message| parse_tool_calls(message.tool_calls.clone()))
-            .unwrap_or_default();
-        let usage = response.usage.unwrap_or_default();
-
-        ChatResponse {
-            id: response.id,
-            content,
-            model: response.model,
-            usage: Usage {
-                input_tokens: usage.prompt_tokens,
-                output_tokens: usage.completion_tokens,
-            },
-            thinking,
-            tool_calls,
-            debug: if request_debug.is_some() || response_debug.is_some() {
-                Some(DebugTrace {
-                    request: request_debug,
-                    response: response_debug,
-                })
-            } else {
-                None
-            },
-        }
-    }
 }
 
 #[async_trait::async_trait]
 impl AiClient for GitHubCopilotClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
         let auth = auth::resolve_auth(&self.config).await?;
-        let url = Self::chat_completions_url(&auth.base_url);
-        let copilot_request = Self::convert_request(request, false);
-        let initiator = Self::initiator_for_messages(&copilot_request.messages);
+        let url = convert::chat_completions_url(&auth.base_url);
+        let copilot_request = convert::convert_request(request, false);
+        let initiator = convert::initiator_for_messages(&copilot_request.messages);
         let request_debug = capture_debug_json(
             &format!("github_copilot request POST {}", url),
             &copilot_request,
@@ -317,7 +93,7 @@ impl AiClient for GitHubCopilotClient {
         let response: GitHubCopilotResponse =
             serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
 
-        Ok(Self::convert_response(
+        Ok(convert::convert_response(
             response,
             request_debug,
             response_debug,
@@ -338,9 +114,9 @@ impl AiClient for GitHubCopilotClient {
                 }
             };
 
-            let url = GitHubCopilotClient::chat_completions_url(&auth.base_url);
-            let copilot_request = GitHubCopilotClient::convert_request(request, true);
-            let initiator = GitHubCopilotClient::initiator_for_messages(&copilot_request.messages);
+            let url = convert::chat_completions_url(&auth.base_url);
+            let copilot_request = convert::convert_request(request, true);
+            let initiator = convert::initiator_for_messages(&copilot_request.messages);
             let mut request_debug = capture_debug_json(
                 &format!("github_copilot stream request POST {}", url),
                 &copilot_request,
@@ -486,7 +262,7 @@ impl AiClient for GitHubCopilotClient {
 
     async fn list_models(&self) -> Result<Vec<String>, AiError> {
         let auth = auth::resolve_auth(&self.config).await?;
-        let url = Self::models_url(&auth.base_url);
+        let url = convert::models_url(&auth.base_url);
         let response = self
             .client
             .get(&url)
@@ -535,8 +311,8 @@ impl AiClient for GitHubCopilotClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        GitHubCopilotClient,
         auth::{derive_copilot_api_base_url, parse_token_expiry},
+        convert,
     };
     use crate::ai::{ChatRequest, Message, ThinkingConfig, ThinkingEffort, ThinkingOutput};
 
@@ -583,7 +359,7 @@ mod tests {
             thinking: Some(ThinkingConfig::enabled_with_effort(ThinkingEffort::Medium)),
         };
 
-        let converted = GitHubCopilotClient::convert_request(request, false);
+        let converted = convert::convert_request(request, false);
         assert_eq!(
             converted.messages[0].reasoning_text.as_deref(),
             Some("reason")
