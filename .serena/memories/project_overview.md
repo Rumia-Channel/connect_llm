@@ -1,0 +1,11 @@
+# conect_llm
+- Purpose: reusable Rust library crate that exposes LLM client access extracted from `sample/kakou`.
+- Tech stack: Rust 2024 edition; async HTTP clients via `reqwest`; async traits via `async-trait`; stream support via `futures-util` and `async-stream`; JSON via `serde`/`serde_json`.
+- Structure:
+  - `src/lib.rs`: crate root, re-exports public LLM API.
+  - `src/ai/mod.rs`: shared request/response types, provider enum, client trait, client factory.
+  - `src/ai/openai.rs`: OpenAI-compatible client implementation used for OpenAI/Sakura/Kimi/Z AI variants.
+  - `src/ai/anthropic.rs`: Anthropic-compatible client implementation used for Anthropic/Kimi Coding.
+  - `src/main.rs`: placeholder binary entrypoint.
+  - `sample/kakou/`: source project the library was extracted from; not yet rewired automatically in this repo.
+- Platform: Windows development environment with PowerShell.
