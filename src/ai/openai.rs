@@ -1,11 +1,14 @@
 #![allow(dead_code)]
 
-use super::{AiClient, AiConfig, AiError, ChatRequest, ChatResponse, StreamChunk, Usage};
+use super::{
+    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, StreamChunk, ThinkingConfig,
+    ThinkingOutput, Usage,
+};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OpenAiRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
@@ -13,13 +16,25 @@ struct OpenAiRequest {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<OpenAiThinkingRequest>,
     stream: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OpenAiMessage {
     role: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiThinkingRequest {
+    #[serde(rename = "type")]
+    thinking_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clear_thinking: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +86,8 @@ struct OpenAiStreamChoice {
 struct OpenAiDelta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     role: Option<String>,
@@ -175,33 +192,89 @@ impl OpenAiClient {
         }
     }
 
-    fn convert_request(request: ChatRequest, stream: bool) -> OpenAiRequest {
-        let mut messages: Vec<OpenAiMessage> = Vec::new();
+    fn supports_reasoning_config(base_url: &str) -> bool {
+        let base_url = Self::normalized_base_url(base_url);
+        base_url.contains("api.moonshot.ai") || base_url.contains("api.z.ai")
+    }
 
-        if let Some(system) = &request.system {
+    fn convert_thinking_config(
+        base_url: &str,
+        thinking: Option<&ThinkingConfig>,
+    ) -> Option<OpenAiThinkingRequest> {
+        let thinking = thinking?;
+        if !Self::supports_reasoning_config(base_url) {
+            return None;
+        }
+
+        Some(OpenAiThinkingRequest {
+            thinking_type: if thinking.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            clear_thinking: if base_url.contains("api.z.ai") {
+                thinking.clear_history
+            } else {
+                None
+            },
+        })
+    }
+
+    fn convert_request(request: ChatRequest, base_url: &str, stream: bool) -> OpenAiRequest {
+        let ChatRequest {
+            model,
+            messages: request_messages,
+            max_tokens,
+            temperature,
+            system,
+            thinking,
+        } = request;
+
+        let mut messages = Vec::new();
+
+        if let Some(system) = system {
             messages.push(OpenAiMessage {
                 role: "system".to_string(),
-                content: system.clone(),
+                content: system,
+                reasoning_content: None,
             });
         }
 
-        for message in request.messages {
+        for message in request_messages {
+            let super::Message {
+                role,
+                content,
+                thinking,
+            } = message;
+            let reasoning_content = thinking.and_then(|thinking| thinking.text);
             messages.push(OpenAiMessage {
-                role: message.role,
-                content: message.content,
+                role,
+                content,
+                reasoning_content,
             });
         }
 
         OpenAiRequest {
-            model: request.model,
+            model,
             messages,
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
+            max_tokens,
+            temperature,
+            thinking: Self::convert_thinking_config(base_url, thinking.as_ref()),
             stream,
         }
     }
 
     fn convert_response(response: OpenAiResponse) -> ChatResponse {
+        let thinking = response
+            .choices
+            .first()
+            .and_then(|choice| choice.message.reasoning_content.clone())
+            .map(|text| ThinkingOutput {
+                text: Some(text),
+                signature: None,
+                redacted: None,
+            });
+
         let content = response
             .choices
             .into_iter()
@@ -217,6 +290,7 @@ impl OpenAiClient {
                 input_tokens: response.usage.prompt_tokens,
                 output_tokens: response.usage.completion_tokens,
             },
+            thinking,
         }
     }
 }
@@ -225,7 +299,7 @@ impl OpenAiClient {
 impl AiClient for OpenAiClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
         let url = Self::chat_completions_url(&self.config.base_url);
-        let openai_request = Self::convert_request(request, false);
+        let openai_request = Self::convert_request(request, &self.config.base_url, false);
 
         let response = self
             .client
@@ -262,7 +336,7 @@ impl AiClient for OpenAiClient {
         request: ChatRequest,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
         let url = Self::chat_completions_url(&self.config.base_url);
-        let openai_request = Self::convert_request(request, true);
+        let openai_request = Self::convert_request(request, &self.config.base_url, true);
         let api_key = self.config.api_key.clone();
         let base_url = self.config.base_url.clone();
 
@@ -322,6 +396,8 @@ impl AiClient for OpenAiClient {
                     if data == "[DONE]" {
                         yield Ok(StreamChunk {
                             delta: String::new(),
+                            thinking_delta: None,
+                            thinking_signature: None,
                             done: true,
                         });
                         return;
@@ -334,9 +410,15 @@ impl AiClient for OpenAiClient {
 
                     if let Some(choice) = stream_response.choices.first() {
                         let delta = choice.delta.content.clone().unwrap_or_default();
+                        let thinking_delta = choice.delta.reasoning_content.clone();
                         let done = choice.finish_reason.is_some();
 
-                        yield Ok(StreamChunk { delta, done });
+                        yield Ok(StreamChunk {
+                            delta,
+                            thinking_delta,
+                            thinking_signature: None,
+                            done,
+                        });
 
                         if done {
                             return;
@@ -347,6 +429,8 @@ impl AiClient for OpenAiClient {
 
             yield Ok(StreamChunk {
                 delta: String::new(),
+                thinking_delta: None,
+                thinking_signature: None,
                 done: true,
             });
         };

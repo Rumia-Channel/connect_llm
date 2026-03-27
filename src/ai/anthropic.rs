@@ -1,14 +1,17 @@
 #![allow(dead_code)]
 
-use super::{AiClient, AiConfig, AiError, ChatRequest, ChatResponse, StreamChunk, Usage};
+use super::{
+    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, StreamChunk, ThinkingConfig,
+    ThinkingDisplay, ThinkingOutput, Usage,
+};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct AnthropicRequest {
     model: String,
-    messages: Vec<AnthropicMessage>,
+    messages: Vec<AnthropicRequestMessage>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
@@ -16,12 +19,38 @@ struct AnthropicRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<AnthropicThinkingRequest>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicMessage {
+#[derive(Debug, Clone, Serialize)]
+struct AnthropicRequestMessage {
     role: String,
-    content: String,
+    content: Vec<AnthropicRequestContentBlock>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnthropicRequestContentBlock {
+    #[serde(rename = "type")]
+    content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnthropicThinkingRequest {
+    #[serde(rename = "type")]
+    thinking_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +65,14 @@ struct AnthropicResponse {
 struct AnthropicContent {
     #[serde(rename = "type")]
     content_type: String,
-    text: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +89,12 @@ struct AnthropicStreamResponse {
 struct AnthropicDelta {
     #[serde(rename = "type")]
     delta_type: Option<String>,
+    #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_reason: Option<String>,
 }
@@ -101,34 +142,124 @@ impl AnthropicClient {
         }
     }
 
+    fn convert_request_message(message: super::Message) -> AnthropicRequestMessage {
+        let super::Message {
+            role,
+            content,
+            thinking,
+        } = message;
+
+        let mut blocks = Vec::new();
+
+        if let Some(thinking) = thinking {
+            if thinking.text.is_some() || thinking.signature.is_some() {
+                blocks.push(AnthropicRequestContentBlock {
+                    content_type: "thinking".to_string(),
+                    text: None,
+                    thinking: Some(thinking.text.unwrap_or_default()),
+                    signature: thinking.signature,
+                    data: None,
+                });
+            }
+
+            if let Some(redacted) = thinking.redacted {
+                blocks.push(AnthropicRequestContentBlock {
+                    content_type: "redacted_thinking".to_string(),
+                    text: None,
+                    thinking: None,
+                    signature: None,
+                    data: Some(redacted),
+                });
+            }
+        }
+
+        blocks.push(AnthropicRequestContentBlock {
+            content_type: "text".to_string(),
+            text: Some(content),
+            thinking: None,
+            signature: None,
+            data: None,
+        });
+
+        AnthropicRequestMessage {
+            role,
+            content: blocks,
+        }
+    }
+
+    fn convert_thinking_config(
+        thinking: Option<&ThinkingConfig>,
+    ) -> Option<AnthropicThinkingRequest> {
+        let thinking = thinking?;
+        if !thinking.enabled {
+            return None;
+        }
+
+        Some(AnthropicThinkingRequest {
+            thinking_type: "enabled",
+            budget_tokens: thinking.budget_tokens.or(Some(1024)),
+            display: match thinking.display {
+                Some(ThinkingDisplay::Summarized) => Some("summarized"),
+                Some(ThinkingDisplay::Omitted) => Some("omitted"),
+                None => None,
+            },
+        })
+    }
+
     fn convert_request(request: ChatRequest) -> AnthropicRequest {
-        let messages: Vec<AnthropicMessage> = request
-            .messages
+        let ChatRequest {
+            model,
+            messages,
+            max_tokens,
+            temperature,
+            system,
+            thinking,
+        } = request;
+
+        let messages = messages
             .into_iter()
-            .map(|message| AnthropicMessage {
-                role: message.role,
-                content: message.content,
-            })
+            .map(Self::convert_request_message)
             .collect();
 
         AnthropicRequest {
-            model: request.model,
+            model,
             messages,
-            max_tokens: request.max_tokens.unwrap_or(4096),
-            system: request.system,
-            temperature: request.temperature,
+            max_tokens: max_tokens.unwrap_or(4096),
+            system,
+            temperature,
             stream: None,
+            thinking: Self::convert_thinking_config(thinking.as_ref()),
         }
     }
 
     fn convert_response(response: AnthropicResponse) -> ChatResponse {
         let content = response
             .content
-            .into_iter()
+            .iter()
             .filter(|content| content.content_type == "text")
-            .map(|content| content.text)
+            .filter_map(|content| content.text.clone())
             .collect::<Vec<_>>()
             .join("");
+
+        let mut thinking_output = ThinkingOutput::default();
+        for content_block in &response.content {
+            match content_block.content_type.as_str() {
+                "thinking" => {
+                    thinking_output.text = content_block.thinking.clone();
+                    thinking_output.signature = content_block.signature.clone();
+                }
+                "redacted_thinking" => {
+                    thinking_output.redacted = content_block.data.clone();
+                }
+                _ => {}
+            }
+        }
+
+        let thinking = if thinking_output.is_empty() {
+            None
+        } else {
+            Some(thinking_output)
+        };
 
         ChatResponse {
             id: response.id,
@@ -138,6 +269,7 @@ impl AnthropicClient {
                 input_tokens: response.usage.input_tokens,
                 output_tokens: response.usage.output_tokens,
             },
+            thinking,
         }
     }
 }
@@ -251,6 +383,8 @@ impl AiClient for AnthropicClient {
                                 "message_stop" => {
                                     yield Ok(StreamChunk {
                                         delta: String::new(),
+                                        thinking_delta: None,
+                                        thinking_signature: None,
                                         done: true,
                                     });
                                     return;
@@ -264,13 +398,38 @@ impl AiClient for AnthropicClient {
                                         serde_json::from_str::<AnthropicStreamResponse>(&data)
                                     {
                                         if let Some(delta) = stream_response.delta {
-                                            if delta.delta_type.as_deref() == Some("text_delta") {
-                                                if let Some(text) = delta.text {
-                                                    yield Ok(StreamChunk {
-                                                        delta: text,
-                                                        done: false,
-                                                    });
+                                            match delta.delta_type.as_deref() {
+                                                Some("text_delta") => {
+                                                    if let Some(text) = delta.text {
+                                                        yield Ok(StreamChunk {
+                                                            delta: text,
+                                                            thinking_delta: None,
+                                                            thinking_signature: None,
+                                                            done: false,
+                                                        });
+                                                    }
                                                 }
+                                                Some("thinking_delta") => {
+                                                    if let Some(thinking) = delta.thinking {
+                                                        yield Ok(StreamChunk {
+                                                            delta: String::new(),
+                                                            thinking_delta: Some(thinking),
+                                                            thinking_signature: None,
+                                                            done: false,
+                                                        });
+                                                    }
+                                                }
+                                                Some("signature_delta") => {
+                                                    if let Some(signature) = delta.signature {
+                                                        yield Ok(StreamChunk {
+                                                            delta: String::new(),
+                                                            thinking_delta: None,
+                                                            thinking_signature: Some(signature),
+                                                            done: false,
+                                                        });
+                                                    }
+                                                }
+                                                _ => {}
                                             }
                                         }
                                     }
@@ -293,6 +452,8 @@ impl AiClient for AnthropicClient {
 
             yield Ok(StreamChunk {
                 delta: String::new(),
+                thinking_delta: None,
+                thinking_signature: None,
                 done: true,
             });
         };

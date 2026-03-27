@@ -11,11 +11,15 @@ use std::sync::Arc;
 pub struct Message {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingOutput>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StreamChunk {
     pub delta: String,
+    pub thinking_delta: Option<String>,
+    pub thinking_signature: Option<String>,
     pub done: bool,
 }
 
@@ -29,6 +33,8 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,12 +43,68 @@ pub struct ChatResponse {
     pub content: String,
     pub model: String,
     pub usage: Usage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThinkingOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redacted: Option<String>,
+}
+
+impl ThinkingOutput {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none() && self.signature.is_none() && self.redacted.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkingConfig {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<ThinkingDisplay>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clear_history: Option<bool>,
+}
+
+impl ThinkingConfig {
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            budget_tokens: Some(1024),
+            display: None,
+            clear_history: None,
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            budget_tokens: None,
+            display: None,
+            clear_history: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingDisplay {
+    Summarized,
+    Omitted,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +240,29 @@ impl AiProvider {
             AiProvider::KimiCoding => "kimi-for-coding",
             AiProvider::ZAi => "glm-5",
             AiProvider::ZAiCoding => "glm-4.7",
+        }
+    }
+
+    pub fn supports_thinking_output(&self) -> bool {
+        match self {
+            AiProvider::OpenAi => false,
+            AiProvider::Anthropic
+            | AiProvider::Sakura
+            | AiProvider::Kimi
+            | AiProvider::KimiCoding
+            | AiProvider::ZAi
+            | AiProvider::ZAiCoding => true,
+        }
+    }
+
+    pub fn supports_thinking_config(&self) -> bool {
+        match self {
+            AiProvider::Anthropic
+            | AiProvider::Kimi
+            | AiProvider::KimiCoding
+            | AiProvider::ZAi
+            | AiProvider::ZAiCoding => true,
+            AiProvider::OpenAi | AiProvider::Sakura => false,
         }
     }
 }
