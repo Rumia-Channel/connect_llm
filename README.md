@@ -2,6 +2,23 @@
 
 複数 LLM provider を共通 API で扱うための Rust ライブラリです。
 
+## 導入
+
+外部プロジェクトから git dependency として追加する場合は、次を実行します。
+
+```bash
+cargo add conect_llm --git https://github.com/Rumia-Channel/conect_llm.git
+```
+
+`Cargo.toml` に直接書く場合は次の形です。
+
+```toml
+[dependencies]
+conect_llm = { git = "https://github.com/Rumia-Channel/conect_llm.git" }
+```
+
+このリポジトリには sample CLI も含まれていますが、`cargo add` で依存追加したときは sample CLI 用 feature は有効になりません。ライブラリとしてそのまま使えます。
+
 現時点では以下を提供します。
 
 - 通常の chat / streaming
@@ -582,4 +599,10 @@ GitHub Copilot は visible thinking とは別に `reasoning_opaque` を返すこ
 cargo fmt
 cargo check
 cargo test
+```
+
+sample CLI を起動する場合は feature を付けます。
+
+```bash
+cargo run --features sample-cli
 ```

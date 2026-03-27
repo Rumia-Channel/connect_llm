@@ -1,16 +1,31 @@
 [package]
 name = "conect_llm"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
+description = "Rust library for using multiple LLM providers through a unified API"
+readme = "README.md"
+repository = "https://github.com/Rumia-Channel/conect_llm"
+
+[features]
+default = []
+sample-cli = ["dep:crossterm", "dep:tokio"]
 
 [dependencies]
 async-stream = "0.3"
 async-trait = "0.1"
-crossterm = "0.28"
+crossterm = { version = "0.28", optional = true }
 futures-util = "0.3"
 rand = "0.8"
 reqwest = { version = "0.13.2", features = ["blocking", "json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"], optional = true }
+
+[dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[bin]]
+name = "conect_llm"
+path = "src/main.rs"
+required-features = ["sample-cli"]
