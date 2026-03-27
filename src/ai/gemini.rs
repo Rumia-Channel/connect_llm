@@ -1,5 +1,13 @@
 #![allow(dead_code)]
 
+mod protocol;
+
+use self::protocol::{
+    GeminiCandidate, GeminiContent, GeminiFunctionCall, GeminiFunctionCallingConfig,
+    GeminiFunctionDeclaration, GeminiFunctionResponse, GeminiGenerationConfig, GeminiPart,
+    GeminiRequest, GeminiResponse, GeminiThinkingConfig, GeminiTool, GeminiToolConfig,
+    GeminiUsageMetadata, api_error_from_response,
+};
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
     ThinkingOutput, ToolCall, ToolCallDelta, ToolChoice, ToolDefinition, Usage, capture_debug_json,
@@ -7,156 +15,8 @@ use super::{
 };
 use futures_util::StreamExt;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Map, Value};
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiRequest {
-    contents: Vec<GeminiContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system_instruction: Option<GeminiContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<GeminiTool>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_config: Option<GeminiToolConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    generation_config: Option<GeminiGenerationConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiContent {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<String>,
-    parts: Vec<GeminiPart>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiPart {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thought: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thought_signature: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    function_call: Option<GeminiFunctionCall>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    function_response: Option<GeminiFunctionResponse>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiFunctionCall {
-    name: String,
-    #[serde(default)]
-    args: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiFunctionResponse {
-    name: String,
-    response: Value,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiTool {
-    function_declarations: Vec<GeminiFunctionDeclaration>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiFunctionDeclaration {
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    parameters: Value,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiToolConfig {
-    function_calling_config: GeminiFunctionCallingConfig,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiFunctionCallingConfig {
-    mode: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    allowed_function_names: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiGenerationConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_config: Option<GeminiThinkingConfig>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiThinkingConfig {
-    include_thoughts: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_budget: Option<u32>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiResponse {
-    #[serde(default)]
-    response_id: Option<String>,
-    #[serde(default)]
-    model_version: Option<String>,
-    #[serde(default)]
-    candidates: Vec<GeminiCandidate>,
-    #[serde(default)]
-    usage_metadata: Option<GeminiUsageMetadata>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiCandidate {
-    #[serde(default)]
-    content: Option<GeminiContent>,
-    #[serde(default)]
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiUsageMetadata {
-    #[serde(default)]
-    prompt_token_count: u32,
-    #[serde(default)]
-    candidates_token_count: u32,
-    #[serde(default)]
-    thoughts_token_count: Option<u32>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct GeminiErrorEnvelope {
-    error: GeminiErrorDetail,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct GeminiErrorDetail {
-    #[serde(default)]
-    code: Option<i32>,
-    message: String,
-    #[serde(default)]
-    status: Option<String>,
-}
-
 pub struct GeminiClient {
     client: Client,
     config: AiConfig,
@@ -504,21 +364,7 @@ impl AiClient for GeminiClient {
             capture_debug_text(&format!("gemini response {} {}", status, url), body.clone());
 
         if !status.is_success() {
-            if let Ok(error) = serde_json::from_str::<GeminiErrorEnvelope>(&body) {
-                let mut parts = vec![format!("HTTP {}", status)];
-                if let Some(code) = error.error.code {
-                    parts.push(format!("code {}", code));
-                }
-                if let Some(kind) = error.error.status {
-                    parts.push(kind);
-                }
-                return Err(AiError::Api(format!(
-                    "{}: {}",
-                    parts.join(" / "),
-                    error.error.message
-                )));
-            }
-            return Err(AiError::Api(format!("HTTP {}: {}", status, body)));
+            return Err(api_error_from_response(status, &body));
         }
 
         let gemini_response: GeminiResponse =
@@ -570,18 +416,7 @@ impl AiClient for GeminiClient {
                     &format!("gemini stream response {} {}", status, url),
                     body.clone(),
                 );
-                if let Ok(error) = serde_json::from_str::<GeminiErrorEnvelope>(&body) {
-                    let mut parts = vec![format!("HTTP {}", status)];
-                    if let Some(code) = error.error.code {
-                        parts.push(format!("code {}", code));
-                    }
-                    if let Some(kind) = error.error.status {
-                        parts.push(kind);
-                    }
-                    yield Err(AiError::Api(format!("{}: {}", parts.join(" / "), error.error.message)));
-                    return;
-                }
-                yield Err(AiError::Api(format!("HTTP {}: {}", status, body)));
+                yield Err(api_error_from_response(status, &body));
                 return;
             }
 
@@ -782,21 +617,7 @@ impl AiClient for GeminiClient {
             .map_err(|error| AiError::Http(error.to_string()))?;
 
         if !status.is_success() {
-            if let Ok(error) = serde_json::from_str::<GeminiErrorEnvelope>(&body) {
-                let mut parts = vec![format!("HTTP {}", status)];
-                if let Some(code) = error.error.code {
-                    parts.push(format!("code {}", code));
-                }
-                if let Some(kind) = error.error.status {
-                    parts.push(kind);
-                }
-                return Err(AiError::Api(format!(
-                    "{}: {}",
-                    parts.join(" / "),
-                    error.error.message
-                )));
-            }
-            return Err(AiError::Api(format!("HTTP {}: {}", status, body)));
+            return Err(api_error_from_response(status, &body));
         }
 
         let models: GeminiModelsResponse =

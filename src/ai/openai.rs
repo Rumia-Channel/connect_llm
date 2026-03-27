@@ -1,247 +1,21 @@
 #![allow(dead_code)]
 
+mod protocol;
+
+use self::protocol::{
+    ModelsResponse, OpenAiExtraBody, OpenAiFunctionDefinition, OpenAiGoogleExtraBody,
+    OpenAiGoogleThinkingConfig, OpenAiMessage, OpenAiRequest, OpenAiResponse, OpenAiStreamResponse,
+    OpenAiThinkingRequest, OpenAiToolCall, OpenAiToolDefinition, OpenAiToolFunction,
+    api_error_from_response, convert_tool_call_deltas, convert_tool_calls_to_response,
+};
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    ThinkingConfig, ThinkingOutput, ToolCall, ToolCallDelta, ToolChoice, ToolDefinition, Usage,
-    capture_debug_json, capture_debug_text, parse_tool_arguments, serialize_tool_arguments,
+    ThinkingConfig, ThinkingOutput, ToolCall, ToolChoice, ToolDefinition, Usage,
+    capture_debug_json, capture_debug_text, serialize_tool_arguments,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-
-#[derive(Debug, Clone, Serialize)]
-struct OpenAiRequest {
-    model: String,
-    messages: Vec<OpenAiMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<OpenAiToolDefinition>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<OpenAiThinkingRequest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    extra_body: Option<OpenAiExtraBody>,
-    stream: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OpenAiMessage {
-    role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<OpenAiToolCall>>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OpenAiToolDefinition {
-    #[serde(rename = "type")]
-    tool_type: &'static str,
-    function: OpenAiFunctionDefinition,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OpenAiFunctionDefinition {
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    parameters: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiToolCall {
-    id: String,
-    #[serde(rename = "type")]
-    call_type: String,
-    function: OpenAiToolFunction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiToolFunction {
-    name: String,
-    arguments: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OpenAiThinkingRequest {
-    #[serde(rename = "type")]
-    thinking_type: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    clear_thinking: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OpenAiExtraBody {
-    google: OpenAiGoogleExtraBody,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OpenAiGoogleExtraBody {
-    thinking_config: OpenAiGoogleThinkingConfig,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OpenAiGoogleThinkingConfig {
-    include_thoughts: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_budget: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiResponse {
-    id: String,
-    choices: Vec<OpenAiChoice>,
-    model: String,
-    usage: OpenAiUsage,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiChoice {
-    message: OpenAiMessageResponse,
-    #[serde(default)]
-    finish_reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiMessageResponse {
-    role: String,
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    reasoning_content: Option<String>,
-    #[serde(default)]
-    reasoning: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<OpenAiToolCall>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiUsage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiStreamResponse {
-    #[allow(dead_code)]
-    id: String,
-    choices: Vec<OpenAiStreamChoice>,
-    #[allow(dead_code)]
-    model: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiStreamChoice {
-    delta: OpenAiDelta,
-    #[serde(default)]
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiDelta {
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    reasoning_content: Option<String>,
-    #[serde(default)]
-    reasoning: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<OpenAiToolCallDelta>>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    role: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiToolCallDelta {
-    index: usize,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    function: Option<OpenAiToolFunctionDelta>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiToolFunctionDelta {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    arguments: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiError {
-    error: OpenAiErrorDetail,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiErrorDetail {
-    message: String,
-    #[serde(default)]
-    code: Option<String>,
-    #[serde(default, rename = "type")]
-    error_type: Option<String>,
-}
-
-fn format_error_detail(
-    status: reqwest::StatusCode,
-    base_url: &str,
-    detail: &OpenAiErrorDetail,
-) -> String {
-    if detail.code.as_deref() == Some("1113")
-        || detail
-            .message
-            .contains("Insufficient balance or no resource package")
-    {
-        if base_url.contains("api.z.ai/api/coding/paas/v4") {
-            return format!(
-                "HTTP {} (code 1113): Z AI Coding plan quota is unavailable or this model is not supported on the coding endpoint. Use GLM-4.7 / GLM-4.6 / GLM-4.5 / GLM-4.5-Air, and check your Z AI Coding plan status.",
-                status
-            );
-        }
-
-        if base_url.contains("api.z.ai") {
-            return format!(
-                "HTTP {} (code 1113): Insufficient balance or no resource package. Recharge your Z AI balance for the general API endpoint, or use the separate Z AI Coding provider with the coding endpoint.",
-                status
-            );
-        }
-    }
-
-    let mut parts = vec![format!("HTTP {}", status)];
-
-    if let Some(code) = &detail.code {
-        if !code.is_empty() {
-            parts.push(format!("code {}", code));
-        }
-    }
-
-    if let Some(error_type) = &detail.error_type {
-        if !error_type.is_empty() {
-            parts.push(error_type.clone());
-        }
-    }
-
-    format!("{}: {}", parts.join(" / "), detail.message)
-}
-
-fn api_error_from_response(status: reqwest::StatusCode, body: &str, base_url: &str) -> AiError {
-    if let Ok(error) = serde_json::from_str::<OpenAiError>(body) {
-        return AiError::Api(format_error_detail(status, base_url, &error.error));
-    }
-
-    AiError::Api(format!("HTTP {}: {}", status, body))
-}
-
 pub struct OpenAiClient {
     client: Client,
     config: AiConfig,
@@ -388,34 +162,6 @@ impl OpenAiClient {
         )
     }
 
-    fn parse_tool_calls(tool_calls: Option<Vec<OpenAiToolCall>>) -> Vec<ToolCall> {
-        tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .map(|tool_call| ToolCall {
-                id: tool_call.id,
-                name: tool_call.function.name,
-                arguments: parse_tool_arguments(&tool_call.function.arguments),
-            })
-            .collect()
-    }
-
-    fn parse_tool_call_deltas(tool_calls: Option<Vec<OpenAiToolCallDelta>>) -> Vec<ToolCallDelta> {
-        tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .map(|tool_call| ToolCallDelta {
-                index: tool_call.index,
-                id: tool_call.id,
-                name: tool_call
-                    .function
-                    .as_ref()
-                    .and_then(|function| function.name.clone()),
-                arguments: tool_call.function.and_then(|function| function.arguments),
-            })
-            .collect()
-    }
-
     fn convert_request(request: ChatRequest, base_url: &str, stream: bool) -> OpenAiRequest {
         let ChatRequest {
             model,
@@ -486,7 +232,7 @@ impl OpenAiClient {
         let tool_calls = response
             .choices
             .first()
-            .map(|choice| Self::parse_tool_calls(choice.message.tool_calls.clone()))
+            .map(|choice| convert_tool_calls_to_response(choice.message.tool_calls.clone()))
             .unwrap_or_default();
         let thinking = response
             .choices
@@ -683,7 +429,7 @@ impl AiClient for OpenAiClient {
                             .clone()
                             .or_else(|| choice.delta.reasoning.clone());
                         let tool_call_deltas =
-                            OpenAiClient::parse_tool_call_deltas(choice.delta.tool_calls.clone());
+                            convert_tool_call_deltas(choice.delta.tool_calls.clone());
                         let done = choice.finish_reason.is_some();
 
                         yield Ok(StreamChunk {
@@ -734,16 +480,6 @@ impl AiClient for OpenAiClient {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ModelsResponse {
-    data: Vec<ModelInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ModelInfo {
-    id: String,
-}
-
 pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, AiError> {
     let url = OpenAiClient::models_url(base_url);
     let response = reqwest::Client::new()
@@ -789,8 +525,11 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, A
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiClient, OpenAiMessageResponse, OpenAiResponse, OpenAiToolCall, OpenAiToolFunction,
-        OpenAiUsage,
+        OpenAiClient,
+        protocol::{
+            OpenAiChoice, OpenAiMessageResponse, OpenAiResponse, OpenAiToolCall,
+            OpenAiToolFunction, OpenAiUsage,
+        },
     };
     use crate::ai::{ChatRequest, Message, ToolCall, ToolChoice, ToolDefinition};
     use serde_json::json;
@@ -838,7 +577,7 @@ mod tests {
     fn convert_response_parses_tool_calls() {
         let response = OpenAiResponse {
             id: "resp_1".to_string(),
-            choices: vec![super::OpenAiChoice {
+            choices: vec![OpenAiChoice {
                 message: OpenAiMessageResponse {
                     role: "assistant".to_string(),
                     content: Some(String::new()),

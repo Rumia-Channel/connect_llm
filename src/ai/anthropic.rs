@@ -1,5 +1,12 @@
 #![allow(dead_code)]
 
+mod protocol;
+
+use self::protocol::{
+    AnthropicRequest, AnthropicRequestContentBlock, AnthropicRequestMessage, AnthropicResponse,
+    AnthropicStreamResponse, AnthropicThinkingRequest, AnthropicToolChoice,
+    AnthropicToolDefinition, api_error_from_response,
+};
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
     ThinkingConfig, ThinkingDisplay, ThinkingOutput, ToolCall, ToolCallDelta, ToolChoice,
@@ -7,180 +14,8 @@ use super::{
 };
 use futures_util::StreamExt;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
-
-#[derive(Debug, Clone, Serialize)]
-struct AnthropicRequest {
-    model: String,
-    messages: Vec<AnthropicRequestMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<AnthropicToolDefinition>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<AnthropicToolChoice>,
-    max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<AnthropicThinkingRequest>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AnthropicRequestMessage {
-    role: String,
-    content: Vec<AnthropicRequestContentBlock>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AnthropicRequestContentBlock {
-    #[serde(rename = "type")]
-    content_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    signature: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    input: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_use_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    is_error: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AnthropicToolDefinition {
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    input_schema: Value,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AnthropicToolChoice {
-    #[serde(rename = "type")]
-    choice_type: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AnthropicThinkingRequest {
-    #[serde(rename = "type")]
-    thinking_type: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    budget_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    display: Option<&'static str>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicResponse {
-    id: String,
-    content: Vec<AnthropicContent>,
-    model: String,
-    usage: AnthropicUsage,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicContent {
-    #[serde(rename = "type")]
-    content_type: String,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    thinking: Option<String>,
-    #[serde(default)]
-    signature: Option<String>,
-    #[serde(default)]
-    data: Option<String>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    input: Option<Value>,
-    #[serde(default)]
-    tool_use_id: Option<String>,
-    #[serde(default)]
-    content: Option<Value>,
-    #[serde(default)]
-    is_error: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicStreamResponse {
-    #[serde(rename = "type")]
-    event_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    delta: Option<AnthropicDelta>,
-    #[serde(default)]
-    index: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content_block: Option<AnthropicContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<AnthropicStreamMessage>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicDelta {
-    #[serde(rename = "type")]
-    delta_type: Option<String>,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    thinking: Option<String>,
-    #[serde(default)]
-    signature: Option<String>,
-    #[serde(default)]
-    partial_json: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stop_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicStreamMessage {
-    id: String,
-    #[serde(rename = "type")]
-    message_type: String,
-    role: String,
-    content: Vec<AnthropicContent>,
-    model: String,
-    stop_reason: Option<String>,
-    usage: Option<AnthropicUsage>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicUsage {
-    input_tokens: u32,
-    output_tokens: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicError {
-    error: AnthropicErrorDetail,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicErrorDetail {
-    #[serde(rename = "type")]
-    error_type: String,
-    message: String,
-}
-
 pub struct AnthropicClient {
     client: Client,
     config: AiConfig,
@@ -487,13 +322,7 @@ impl AiClient for AnthropicClient {
         );
 
         if !status.is_success() {
-            if let Ok(error) = serde_json::from_str::<AnthropicError>(&body) {
-                return Err(AiError::Api(format!(
-                    "{}: {}",
-                    error.error.error_type, error.error.message
-                )));
-            }
-            return Err(AiError::Api(format!("HTTP {}: {}", status, body)));
+            return Err(api_error_from_response(status, &body));
         }
 
         let anthropic_response: AnthropicResponse =
