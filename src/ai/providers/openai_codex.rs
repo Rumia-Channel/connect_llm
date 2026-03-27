@@ -6,7 +6,7 @@ pub fn spec() -> ProviderSpec {
         default_base_url: "https://chatgpt.com/backend-api",
         default_model: "gpt-5.4",
         supports_thinking_output: false,
-        supports_thinking_config: false,
+        supports_thinking_config: true,
         api_style: ApiStyle::OpenAiCodex,
     }
 }

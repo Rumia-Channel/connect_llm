@@ -21,6 +21,7 @@
 - `Message`
 - `StreamChunk`
 - `ThinkingConfig`
+- `ThinkingEffort`
 - `ThinkingOutput`
 
 `src/lib.rs` から再 export されているので、通常は `conect_llm::...` で参照できます。
@@ -143,10 +144,11 @@ let assistant_message = Message {
 Thinking を要求する側は `ChatRequest.thinking` を使います。
 
 ```rust
-use conect_llm::{ThinkingConfig, ThinkingDisplay};
+use conect_llm::{ThinkingConfig, ThinkingDisplay, ThinkingEffort};
 
 let thinking = ThinkingConfig {
     enabled: true,
+    effort: Some(ThinkingEffort::High),
     budget_tokens: Some(2048),
     display: Some(ThinkingDisplay::Summarized),
     clear_history: None,
@@ -156,13 +158,23 @@ let thinking = ThinkingConfig {
 `ThinkingConfig` の意味は次の通りです。
 
 - `enabled`: Thinking を有効にするか
+- `effort`: OpenAI Codex などで使う思考レベル
 - `budget_tokens`: Anthropic 系の thinking budget
 - `display`: Anthropic 系の表示方針
 - `clear_history`: Z AI 系の clear thinking 用
 
+`ThinkingEffort` は次を持ちます。
+
+- `Minimal`
+- `Low`
+- `Medium`
+- `High`
+- `XHigh`
+
 簡易ヘルパーもあります。
 
 - `ThinkingConfig::enabled()`
+- `ThinkingConfig::enabled_with_effort()`
 - `ThinkingConfig::disabled()`
 
 ただし、すべての provider がこの設定を受け付けるわけではありません。受け付け可否は `AiProvider::supports_thinking_config()` で判定します。
@@ -175,7 +187,7 @@ let thinking = ThinkingConfig {
 | `AiProvider::GoogleAiStudio` | OpenAI-compatible | No | Yes |
 | `AiProvider::Gemini` | Gemini native | Yes | Yes |
 | `AiProvider::OpenAi` | OpenAI-compatible | No | No |
-| `AiProvider::OpenAiCodex` | ChatGPT Codex backend | No | No |
+| `AiProvider::OpenAiCodex` | ChatGPT Codex backend | No | Yes |
 | `AiProvider::Sakura` | OpenAI-compatible | Yes | No |
 | `AiProvider::Kimi` | OpenAI-compatible | Yes | Yes |
 | `AiProvider::KimiCoding` | Anthropic | Yes | Yes |
@@ -209,6 +221,8 @@ println!("{}", provider.supports_thinking_config());
 - `AiProvider::OpenAiCodex` の `api_key` は通常の OpenAI API key ではなく、ChatGPT OAuth の access token として扱います。
 - `AiProvider::OpenAiCodex` では `api_key` を空にすると `CODEX_HOME/auth.json` または `~/.codex/auth.json` から access token / refresh token を読みます。
 - `AiProvider::OpenAiCodex` は access token の期限が近い場合、`refresh_token` を使って `auth.openai.com/oauth/token` で更新し、`auth.json` へ書き戻します。
+- `AiProvider::OpenAiCodex` では `ChatRequest.model` でモデルを選べます。
+- `AiProvider::OpenAiCodex` では `ChatRequest.thinking.effort` を `reasoning.effort` として送ります。`ThinkingConfig::enabled()` は `medium` として扱います。
 - `AiProvider::GoogleAiStudio` は request 側で Gemini の `thinking_config` を送れますが、このライブラリでは structured thinking output の公開 capability は `false` にしています。
 - OpenAI 互換 provider でも `reasoning_content` を返す実装なら、transport 側は受け取れるようにしてあります。
 - `Message.thinking` は provider によっては一部しか使われません。OpenAI 互換系では主に `text` を再送します。
@@ -268,6 +282,36 @@ let client = provider.create_client(AiConfig {
 ```
 
 この場合、`api_key` は `sk-...` の API key ではなく ChatGPT OAuth の bearer token です。
+
+### モデルと思考レベルを指定する
+
+```rust
+use conect_llm::{
+    AiConfig, AiProvider, ChatRequest, Message, ThinkingConfig, ThinkingEffort,
+};
+
+let provider = AiProvider::OpenAiCodex;
+let client = provider.create_client(AiConfig {
+    api_key: String::new(),
+    base_url: provider.default_base_url().to_string(),
+    model: "gpt-5.4-mini".to_string(),
+});
+
+let request = ChatRequest {
+    model: "gpt-5.4".to_string(),
+    messages: vec![Message {
+        role: "user".to_string(),
+        content: "この変更方針で進めて".to_string(),
+        thinking: None,
+    }],
+    max_tokens: Some(8192),
+    temperature: None,
+    system: None,
+    thinking: Some(ThinkingConfig::enabled_with_effort(ThinkingEffort::XHigh)),
+};
+```
+
+Codex ではこの `thinking.effort` を `reasoning.effort` として送ります。モデルは `AiConfig.model` と `ChatRequest.model` のどちらでも指定できますが、実際に送信されるのは `ChatRequest.model` です。
 
 ## 開発
 

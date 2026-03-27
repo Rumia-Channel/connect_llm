@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use super::{
-    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, StreamChunk, ThinkingOutput, Usage,
+    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, StreamChunk, ThinkingConfig,
+    ThinkingEffort, ThinkingOutput, Usage,
 };
 use futures_util::StreamExt;
 use rand::{RngCore, rngs::OsRng};
@@ -97,7 +98,15 @@ struct OpenAiCodexRequest {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<OpenAiCodexReasoningRequest>,
     stream: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiCodexReasoningRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -895,6 +904,30 @@ impl OpenAiCodexClient {
         }
     }
 
+    fn convert_reasoning_config(
+        thinking: Option<&ThinkingConfig>,
+    ) -> Option<OpenAiCodexReasoningRequest> {
+        let thinking = thinking?;
+
+        if !thinking.enabled {
+            return Some(OpenAiCodexReasoningRequest {
+                effort: Some("none"),
+            });
+        }
+
+        let effort = match thinking.effort.unwrap_or(ThinkingEffort::Medium) {
+            ThinkingEffort::Minimal => "minimal",
+            ThinkingEffort::Low => "low",
+            ThinkingEffort::Medium => "medium",
+            ThinkingEffort::High => "high",
+            ThinkingEffort::XHigh => "xhigh",
+        };
+
+        Some(OpenAiCodexReasoningRequest {
+            effort: Some(effort),
+        })
+    }
+
     fn convert_request(request: ChatRequest, stream: bool) -> OpenAiCodexRequest {
         let ChatRequest {
             model,
@@ -902,7 +935,7 @@ impl OpenAiCodexClient {
             max_tokens,
             temperature,
             system,
-            thinking: _,
+            thinking,
         } = request;
 
         let mut messages = Vec::new();
@@ -933,6 +966,7 @@ impl OpenAiCodexClient {
             messages,
             max_tokens,
             temperature,
+            reasoning: Self::convert_reasoning_config(thinking.as_ref()),
             stream,
         }
     }
@@ -1214,6 +1248,7 @@ impl AiClient for OpenAiCodexClient {
     async fn list_models(&self) -> Result<Vec<String>, AiError> {
         Ok(vec![
             "gpt-5.4".to_string(),
+            "gpt-5.4-mini".to_string(),
             "gpt-5.3-codex".to_string(),
             "gpt-5.3-codex-spark".to_string(),
             "gpt-5.2".to_string(),
@@ -1225,7 +1260,8 @@ impl AiClient for OpenAiCodexClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64_url_decode, extract_account_id_from_tokens};
+    use super::{OpenAiCodexClient, base64_url_decode, extract_account_id_from_tokens};
+    use crate::ai::{ChatRequest, Message, ThinkingConfig, ThinkingEffort};
 
     #[test]
     fn decodes_base64_url_without_padding() {
@@ -1233,6 +1269,50 @@ mod tests {
         assert_eq!(
             String::from_utf8(decoded).expect("utf8"),
             r#"{"foo":"bar"}"#
+        );
+    }
+
+    #[test]
+    fn codex_request_uses_medium_reasoning_when_thinking_is_enabled() {
+        let request = ChatRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                thinking: None,
+            }],
+            max_tokens: None,
+            temperature: None,
+            system: None,
+            thinking: Some(ThinkingConfig::enabled()),
+        };
+
+        let converted = OpenAiCodexClient::convert_request(request, false);
+        assert_eq!(
+            converted.reasoning.and_then(|reasoning| reasoning.effort),
+            Some("medium")
+        );
+    }
+
+    #[test]
+    fn codex_request_uses_explicit_reasoning_effort() {
+        let request = ChatRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                thinking: None,
+            }],
+            max_tokens: None,
+            temperature: None,
+            system: None,
+            thinking: Some(ThinkingConfig::enabled_with_effort(ThinkingEffort::XHigh)),
+        };
+
+        let converted = OpenAiCodexClient::convert_request(request, false);
+        assert_eq!(
+            converted.reasoning.and_then(|reasoning| reasoning.effort),
+            Some("xhigh")
         );
     }
 

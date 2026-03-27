@@ -80,6 +80,8 @@ impl ThinkingOutput {
 pub struct ThinkingConfig {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ThinkingEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display: Option<ThinkingDisplay>,
@@ -91,6 +93,17 @@ impl ThinkingConfig {
     pub fn enabled() -> Self {
         Self {
             enabled: true,
+            effort: Some(ThinkingEffort::Medium),
+            budget_tokens: Some(1024),
+            display: None,
+            clear_history: None,
+        }
+    }
+
+    pub fn enabled_with_effort(effort: ThinkingEffort) -> Self {
+        Self {
+            enabled: true,
+            effort: Some(effort),
             budget_tokens: Some(1024),
             display: None,
             clear_history: None,
@@ -100,11 +113,22 @@ impl ThinkingConfig {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            effort: None,
             budget_tokens: None,
             display: None,
             clear_history: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingEffort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
