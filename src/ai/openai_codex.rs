@@ -93,76 +93,95 @@ pub struct OpenAiCodexBrowserAuth {
 #[derive(Debug, Clone, Serialize)]
 struct OpenAiCodexRequest {
     model: String,
-    messages: Vec<OpenAiCodexMessage>,
+    instructions: String,
+    input: Vec<OpenAiCodexInputMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
+    max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<OpenAiCodexReasoningRequest>,
     stream: bool,
+    store: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct OpenAiCodexReasoningRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiCodexMessage {
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiCodexInputMessage {
     role: String,
-    content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: Option<String>,
+    content: Vec<OpenAiCodexInputContent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiCodexResponse {
     id: String,
-    choices: Vec<OpenAiCodexChoice>,
     model: String,
     #[serde(default)]
     usage: Option<OpenAiCodexUsage>,
+    #[serde(default)]
+    output: Vec<OpenAiCodexOutputItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiCodexChoice {
-    message: OpenAiCodexMessage,
+struct OpenAiCodexInputContent {
+    #[serde(rename = "type")]
+    content_type: &'static str,
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAiCodexOutputItem {
+    #[serde(rename = "type")]
+    item_type: String,
     #[serde(default)]
-    finish_reason: Option<String>,
+    content: Vec<OpenAiCodexOutputContent>,
+    #[serde(default)]
+    summary: Vec<OpenAiCodexReasoningSummary>,
+    #[serde(default)]
+    role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct OpenAiCodexUsage {
     #[serde(default)]
-    prompt_tokens: u32,
+    input_tokens: u32,
     #[serde(default)]
-    completion_tokens: u32,
+    output_tokens: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiCodexStreamResponse {
-    #[allow(dead_code)]
-    id: String,
-    choices: Vec<OpenAiCodexStreamChoice>,
-    #[allow(dead_code)]
-    model: String,
+struct OpenAiCodexOutputContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiCodexStreamChoice {
-    delta: OpenAiCodexDelta,
+struct OpenAiCodexReasoningSummary {
+    #[serde(rename = "type", default)]
+    summary_type: Option<String>,
     #[serde(default)]
-    finish_reason: Option<String>,
+    text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAiCodexDelta {
+struct OpenAiCodexEvent {
+    #[serde(rename = "type")]
+    event_type: String,
     #[serde(default)]
-    content: Option<String>,
+    delta: Option<String>,
     #[serde(default)]
-    reasoning_content: Option<String>,
+    response: Option<OpenAiCodexResponse>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -912,6 +931,7 @@ impl OpenAiCodexClient {
         if !thinking.enabled {
             return Some(OpenAiCodexReasoningRequest {
                 effort: Some("none"),
+                summary: None,
             });
         }
 
@@ -925,81 +945,101 @@ impl OpenAiCodexClient {
 
         Some(OpenAiCodexReasoningRequest {
             effort: Some(effort),
+            summary: Some("auto"),
         })
+    }
+
+    fn default_instructions() -> String {
+        "You are a helpful assistant.".to_string()
     }
 
     fn convert_request(request: ChatRequest, stream: bool) -> OpenAiCodexRequest {
         let ChatRequest {
             model,
             messages: request_messages,
-            max_tokens,
+            max_tokens: _,
             temperature,
             system,
             thinking,
         } = request;
 
-        let mut messages = Vec::new();
-
-        if let Some(system) = system {
-            messages.push(OpenAiCodexMessage {
-                role: "system".to_string(),
-                content: system,
-                reasoning_content: None,
-            });
-        }
+        let mut input = Vec::new();
 
         for message in request_messages {
             let super::Message {
                 role,
                 content,
-                thinking,
+                thinking: _,
             } = message;
-            messages.push(OpenAiCodexMessage {
+            let content_type = if role == "assistant" {
+                "output_text"
+            } else {
+                "input_text"
+            };
+            input.push(OpenAiCodexInputMessage {
                 role,
-                content,
-                reasoning_content: thinking.and_then(|thinking| thinking.text),
+                content: vec![OpenAiCodexInputContent {
+                    content_type,
+                    text: content,
+                }],
             });
         }
 
         OpenAiCodexRequest {
             model,
-            messages,
-            max_tokens,
+            instructions: system.unwrap_or_else(Self::default_instructions),
+            input,
+            max_output_tokens: None,
             temperature,
             reasoning: Self::convert_reasoning_config(thinking.as_ref()),
             stream,
+            store: false,
+        }
+    }
+
+    fn extract_text_from_output(output: &[OpenAiCodexOutputItem]) -> String {
+        output
+            .iter()
+            .filter(|item| item.item_type == "message" && item.role.as_deref() == Some("assistant"))
+            .flat_map(|item| item.content.iter())
+            .filter(|part| part.content_type == "output_text")
+            .filter_map(|part| part.text.clone())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn extract_thinking_from_output(output: &[OpenAiCodexOutputItem]) -> Option<ThinkingOutput> {
+        let text = output
+            .iter()
+            .filter(|item| item.item_type == "reasoning")
+            .flat_map(|item| item.summary.iter())
+            .filter_map(|part| part.text.clone())
+            .collect::<Vec<_>>()
+            .join("");
+
+        if text.is_empty() {
+            None
+        } else {
+            Some(ThinkingOutput {
+                text: Some(text),
+                signature: None,
+                redacted: None,
+            })
         }
     }
 
     fn convert_response(response: OpenAiCodexResponse) -> ChatResponse {
-        let thinking = response
-            .choices
-            .first()
-            .and_then(|choice| choice.message.reasoning_content.clone())
-            .map(|text| ThinkingOutput {
-                text: Some(text),
-                signature: None,
-                redacted: None,
-            });
-
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .map(|choice| choice.message.content)
-            .unwrap_or_default();
-
         let usage = response.usage.unwrap_or_default();
 
         ChatResponse {
             id: response.id,
-            content,
+            content: Self::extract_text_from_output(&response.output),
             model: response.model,
             usage: Usage {
-                input_tokens: usage.prompt_tokens,
-                output_tokens: usage.completion_tokens,
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
             },
-            thinking,
+            thinking: Self::extract_thinking_from_output(&response.output),
         }
     }
 
@@ -1090,13 +1130,14 @@ impl AiClient for OpenAiCodexClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
         let auth = self.resolve_auth().await?;
         let url = Self::endpoint_url(&self.config.base_url);
-        let request = Self::convert_request(request, false);
+        let request = Self::convert_request(request, true);
 
         let mut builder = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", auth.access_token))
             .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
             .json(&request);
 
         if let Some(account_id) = auth.account_id {
@@ -1118,10 +1159,58 @@ impl AiClient for OpenAiCodexClient {
             return Err(api_error_from_response(status, &body));
         }
 
-        let response: OpenAiCodexResponse =
-            serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+        let mut content = String::new();
+        let mut thinking_text = String::new();
+        let mut final_response: Option<OpenAiCodexResponse> = None;
 
-        Ok(Self::convert_response(response))
+        for raw_line in body.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || !line.starts_with("data: ") {
+                continue;
+            }
+
+            let data = &line[6..];
+            if data == "[DONE]" {
+                break;
+            }
+
+            let event: OpenAiCodexEvent =
+                serde_json::from_str(data).map_err(|error| AiError::Parse(error.to_string()))?;
+
+            match event.event_type.as_str() {
+                "response.output_text.delta" => {
+                    if let Some(delta) = event.delta {
+                        content.push_str(&delta);
+                    }
+                }
+                "response.reasoning_summary_text.delta" => {
+                    if let Some(delta) = event.delta {
+                        thinking_text.push_str(&delta);
+                    }
+                }
+                "response.completed" => {
+                    final_response = event.response;
+                }
+                _ => {}
+            }
+        }
+
+        let response = final_response.ok_or_else(|| {
+            AiError::Parse("missing response.completed event in Codex stream".to_string())
+        })?;
+        let mut response = Self::convert_response(response);
+        if response.content.is_empty() && !content.is_empty() {
+            response.content = content;
+        }
+        if response.thinking.is_none() && !thinking_text.is_empty() {
+            response.thinking = Some(ThinkingOutput {
+                text: Some(thinking_text),
+                signature: None,
+                redacted: None,
+            });
+        }
+
+        Ok(response)
     }
 
     fn chat_stream(
@@ -1145,6 +1234,7 @@ impl AiClient for OpenAiCodexClient {
                 .post(OpenAiCodexClient::endpoint_url(&config.base_url))
                 .header("Authorization", format!("Bearer {}", auth.access_token))
                 .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
                 .json(&request);
 
             if let Some(account_id) = auth.account_id {
@@ -1206,26 +1296,46 @@ impl AiClient for OpenAiCodexClient {
                         return;
                     }
 
-                    let response: OpenAiCodexStreamResponse = match serde_json::from_str(data) {
-                        Ok(response) => response,
+                    let event: OpenAiCodexEvent = match serde_json::from_str(data) {
+                        Ok(event) => event,
                         Err(_) => continue,
                     };
 
-                    if let Some(choice) = response.choices.first() {
-                        let delta = choice.delta.content.clone().unwrap_or_default();
-                        let thinking_delta = choice.delta.reasoning_content.clone();
-                        let done = choice.finish_reason.is_some();
-
-                        yield Ok(StreamChunk {
-                            delta,
-                            thinking_delta,
-                            thinking_signature: None,
-                            done,
-                        });
-
-                        if done {
+                    match event.event_type.as_str() {
+                        "response.output_text.delta" => {
+                            let delta = event.delta.unwrap_or_default();
+                            if delta.is_empty() {
+                                continue;
+                            }
+                            yield Ok(StreamChunk {
+                                delta,
+                                thinking_delta: None,
+                                thinking_signature: None,
+                                done: false,
+                            });
+                        }
+                        "response.reasoning_summary_text.delta" => {
+                            let thinking_delta = event.delta.or(event.text);
+                            if thinking_delta.is_none() {
+                                continue;
+                            }
+                            yield Ok(StreamChunk {
+                                delta: String::new(),
+                                thinking_delta,
+                                thinking_signature: None,
+                                done: false,
+                            });
+                        }
+                        "response.completed" => {
+                            yield Ok(StreamChunk {
+                                delta: String::new(),
+                                thinking_delta: None,
+                                thinking_signature: None,
+                                done: true,
+                            });
                             return;
                         }
+                        _ => {}
                     }
                 }
             }
