@@ -25,7 +25,7 @@ const REFRESH_SAFETY_WINDOW_MS: u64 = 30_000;
 const BROWSER_AUTH_SUCCESS_HTML: &str = r#"<!doctype html>
 <html>
   <head>
-    <title>conect_llm - Codex Authorization Successful</title>
+    <title>connect_llm - Codex Authorization Successful</title>
     <style>
       body {
         font-family: system-ui, -apple-system, sans-serif;
@@ -177,7 +177,7 @@ fn build_authorize_url(redirect_uri: &str, verifier: &str, state: &str) -> Resul
         .append_pair("id_token_add_organizations", "true")
         .append_pair("codex_cli_simplified_flow", "true")
         .append_pair("state", state)
-        .append_pair("originator", "conect_llm");
+        .append_pair("originator", "connect_llm");
     Ok(url.to_string())
 }
 
@@ -186,7 +186,7 @@ fn browser_auth_error_html(message: &str) -> String {
         r#"<!doctype html>
 <html>
   <head>
-    <title>conect_llm - Codex Authorization Failed</title>
+    <title>connect_llm - Codex Authorization Failed</title>
     <style>
       body {{
         font-family: system-ui, -apple-system, sans-serif;

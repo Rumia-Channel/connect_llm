@@ -1,5 +1,5 @@
 use crate::sample_cli::io::{prompt, prompt_default};
-use conect_llm::{
+use connect_llm::{
     AiConfig, AiProvider, Message, ThinkingConfig, ThinkingEffort, github_copilot_auth_path,
     login_github_copilot_via_device, login_openai_codex_via_browser, openai_codex_auth_path,
 };
@@ -83,7 +83,7 @@ pub(crate) fn select_provider() -> Result<AiProvider, Box<dyn std::error::Error>
 
 pub(crate) async fn select_model(
     provider: AiProvider,
-    client: &dyn conect_llm::AiClient,
+    client: &dyn connect_llm::AiClient,
 ) -> Result<String, Box<dyn std::error::Error>> {
     println!("Fetching models...");
 
@@ -272,7 +272,7 @@ pub(crate) fn temp_client(
     provider: AiProvider,
     api_key: String,
     base_url: String,
-) -> Arc<dyn conect_llm::AiClient> {
+) -> Arc<dyn connect_llm::AiClient> {
     provider.create_client(AiConfig {
         api_key,
         base_url,

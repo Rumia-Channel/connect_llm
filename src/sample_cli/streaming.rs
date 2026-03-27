@@ -1,13 +1,13 @@
-use conect_llm::{ChatRequest, ChatResponse, DebugTrace, ThinkingOutput, ToolCall, Usage};
+use connect_llm::{ChatRequest, ChatResponse, DebugTrace, ThinkingOutput, ToolCall, Usage};
 use futures_util::StreamExt;
 use std::io::{self, Write};
 
 pub(crate) async fn send_request(
-    client: &dyn conect_llm::AiClient,
+    client: &dyn connect_llm::AiClient,
     request: ChatRequest,
     use_stream: bool,
     include_thinking: bool,
-) -> Result<ChatResponse, conect_llm::AiError> {
+) -> Result<ChatResponse, connect_llm::AiError> {
     if !use_stream {
         let mut response = client.chat(request).await?;
         if !include_thinking {
@@ -65,7 +65,7 @@ pub(crate) async fn send_request(
             print!("{}", chunk.delta);
             io::stdout()
                 .flush()
-                .map_err(|error| conect_llm::AiError::Http(error.to_string()))?;
+                .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
             content.push_str(&chunk.delta);
         }
 
@@ -78,7 +78,7 @@ pub(crate) async fn send_request(
                 print!("{}", thinking_delta);
                 io::stdout()
                     .flush()
-                    .map_err(|error| conect_llm::AiError::Http(error.to_string()))?;
+                    .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
                 thinking_text.push_str(&thinking_delta);
             }
             if let Some(signature) = chunk.thinking_signature {

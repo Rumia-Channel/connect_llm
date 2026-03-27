@@ -1,10 +1,10 @@
 [package]
-name = "conect_llm"
+name = "connect_llm"
 version = "0.1.1"
 edition = "2024"
 description = "Rust library for using multiple LLM providers through a unified API"
 readme = "README.md"
-repository = "https://github.com/Rumia-Channel/conect_llm"
+repository = "https://github.com/Rumia-Channel/connect_llm"
 
 [features]
 default = []
@@ -26,6 +26,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"], optional = tr
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [[bin]]
-name = "conect_llm"
+name = "connect_llm"
 path = "src/main.rs"
 required-features = ["sample-cli"]

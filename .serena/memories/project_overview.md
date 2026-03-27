@@ -1,4 +1,4 @@
-# conect_llm
+# connect_llm
 - Purpose: reusable Rust library crate that exposes LLM client access extracted from `sample/kakou`.
 - Tech stack: Rust 2024 edition; async HTTP clients via `reqwest`; async traits via `async-trait`; stream support via `futures-util` and `async-stream`; JSON via `serde`/`serde_json`.
 - Structure:

@@ -10,10 +10,10 @@ use self::settings::{
     select_thinking_enabled, temp_client,
 };
 use self::streaming::send_request;
-use conect_llm::{AiConfig, ChatRequest, ContextManager, Message, set_debug_logging};
+use connect_llm::{AiConfig, ChatRequest, ContextManager, Message, set_debug_logging};
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    println!("conect_llm sample chat");
+    println!("connect_llm sample chat");
     println!("API key is only kept in this process memory.");
     println!("Chat input uses Enter for newline and Ctrl+Enter to send.");
     println!();
@@ -24,9 +24,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         provider.default_base_url(),
         "Press Enter to use the provider default.",
     )?;
-    let api_key_hint = if provider == conect_llm::AiProvider::OpenAiCodex {
+    let api_key_hint = if provider == connect_llm::AiProvider::OpenAiCodex {
         "Press Enter to use CODEX_HOME/auth.json or ~/.codex/auth.json."
-    } else if provider == conect_llm::AiProvider::GitHubCopilot {
+    } else if provider == connect_llm::AiProvider::GitHubCopilot {
         "Press Enter to use COPILOT_HOME/auth.json or ~/.copilot/auth.json."
     } else {
         "Typed visibly, stored only in memory for this run."

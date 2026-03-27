@@ -1,4 +1,4 @@
-use conect_llm::{ThinkingOutput, ToolCall};
+use connect_llm::{ThinkingOutput, ToolCall};
 use crossterm::{
     cursor::{MoveToColumn, MoveUp},
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},

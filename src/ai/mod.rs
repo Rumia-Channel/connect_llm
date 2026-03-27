@@ -40,7 +40,7 @@ pub(crate) fn debug_log(label: &str, body: &str) {
         return;
     }
 
-    eprintln!("[conect_llm debug] {}", label);
+    eprintln!("[connect_llm debug] {}", label);
     eprintln!("{}", body);
 }
 

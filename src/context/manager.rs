@@ -6,8 +6,8 @@ use futures_util::{
 };
 use serde_json::Value;
 
-const SUMMARY_OPEN: &str = "<conect_llm-context-summary>";
-const SUMMARY_CLOSE: &str = "</conect_llm-context-summary>";
+const SUMMARY_OPEN: &str = "<connect_llm-context-summary>";
+const SUMMARY_CLOSE: &str = "</connect_llm-context-summary>";
 
 #[derive(Debug, Clone)]
 pub struct ContextManagerConfig {
@@ -663,7 +663,7 @@ mod tests {
     fn merges_summary_sections_idempotently() {
         let merged = merge_summary_into_system(
             Some(
-                "instructions\n\n<conect_llm-context-summary>\nold\n</conect_llm-context-summary>",
+                "instructions\n\n<connect_llm-context-summary>\nold\n</connect_llm-context-summary>",
             ),
             "new",
         );
