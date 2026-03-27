@@ -5,7 +5,7 @@ use super::protocol::{
 };
 use crate::ai::{
     ChatRequest, ChatResponse, DebugTrace, Message, ThinkingConfig, ThinkingOutput, ToolCall,
-    ToolChoice, ToolDefinition, Usage, serialize_tool_arguments,
+    ToolChoice, ToolDefinition, Usage, request_policy, serialize_tool_arguments,
 };
 use serde_json::{Value, json};
 
@@ -147,6 +147,8 @@ pub(super) fn convert_request(request: ChatRequest, base_url: &str, stream: bool
         system,
         thinking,
     } = request;
+    let temperature =
+        request_policy::sanitize_openai_style_temperature(base_url, &model, temperature);
 
     let mut messages = Vec::new();
 

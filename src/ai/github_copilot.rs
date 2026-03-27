@@ -370,4 +370,69 @@ mod tests {
         );
         assert_eq!(converted.reasoning_effort, Some("medium"));
     }
+
+    #[test]
+    fn copilot_drops_temperature_for_codex_models() {
+        let request = ChatRequest {
+            model: "gpt-5.2-codex".to_string(),
+            messages: vec![Message::user("hello")],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: Some(256),
+            temperature: Some(0.4),
+            system: None,
+            thinking: None,
+        };
+
+        let converted = convert::convert_request(request, false);
+        assert_eq!(converted.temperature, None);
+    }
+
+    #[test]
+    fn copilot_claude_drops_reasoning_effort_but_keeps_budget() {
+        let request = ChatRequest {
+            model: "claude-sonnet-4.5".to_string(),
+            messages: vec![Message::user("hello")],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: Some(256),
+            temperature: None,
+            system: None,
+            thinking: Some(ThinkingConfig {
+                enabled: true,
+                effort: Some(ThinkingEffort::Medium),
+                budget_tokens: Some(4_000),
+                display: None,
+                clear_history: None,
+            }),
+        };
+
+        let converted = convert::convert_request(request, false);
+        assert_eq!(converted.reasoning_effort, None);
+        assert_eq!(converted.thinking_budget, Some(4_000));
+    }
+
+    #[test]
+    fn copilot_gemini_drops_reasoning_params() {
+        let request = ChatRequest {
+            model: "gemini-2.5-pro".to_string(),
+            messages: vec![Message::user("hello")],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: Some(256),
+            temperature: None,
+            system: None,
+            thinking: Some(ThinkingConfig {
+                enabled: true,
+                effort: Some(ThinkingEffort::Medium),
+                budget_tokens: Some(1_024),
+                display: None,
+                clear_history: None,
+            }),
+        };
+
+        let converted = convert::convert_request(request, false);
+        assert_eq!(converted.reasoning_effort, None);
+        assert_eq!(converted.thinking_budget, None);
+    }
 }

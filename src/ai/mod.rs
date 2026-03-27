@@ -7,6 +7,7 @@ pub mod github_copilot;
 pub mod openai;
 pub mod openai_codex;
 pub mod providers;
+mod request_policy;
 
 use futures_util::stream::BoxStream;
 pub use github_copilot::{

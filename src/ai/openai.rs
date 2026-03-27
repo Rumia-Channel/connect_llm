@@ -322,6 +322,24 @@ mod tests {
     }
 
     #[test]
+    fn convert_request_drops_temperature_for_openai_gpt5_models() {
+        let mut request = ChatRequest::new("gpt-5.4", vec![Message::user("hello")]);
+        request.temperature = Some(0.2);
+
+        let converted = convert::convert_request(request, "https://api.openai.com", false);
+        assert_eq!(converted.temperature, None);
+    }
+
+    #[test]
+    fn convert_request_keeps_temperature_for_kimi_models() {
+        let mut request = ChatRequest::new("kimi-k2.5", vec![Message::user("hello")]);
+        request.temperature = Some(0.6);
+
+        let converted = convert::convert_request(request, "https://api.moonshot.ai", false);
+        assert_eq!(converted.temperature, Some(0.6));
+    }
+
+    #[test]
     fn convert_response_parses_tool_calls() {
         let response = OpenAiResponse {
             id: "resp_1".to_string(),

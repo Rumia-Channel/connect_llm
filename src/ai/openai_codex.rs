@@ -289,6 +289,7 @@ mod tests {
             converted.reasoning.and_then(|reasoning| reasoning.effort),
             Some("medium")
         );
+        assert_eq!(converted.temperature, None);
     }
 
     #[test]
@@ -318,6 +319,23 @@ mod tests {
             converted.reasoning.and_then(|reasoning| reasoning.effort),
             Some("xhigh")
         );
+    }
+
+    #[test]
+    fn codex_request_drops_temperature() {
+        let request = ChatRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![Message::user("hello")],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: None,
+            temperature: Some(0.3),
+            system: None,
+            thinking: None,
+        };
+
+        let converted = OpenAiCodexClient::convert_request(request, false);
+        assert_eq!(converted.temperature, None);
     }
 
     #[test]
