@@ -1,11 +1,18 @@
-use connect_llm::{DebugTrace, ThinkingOutput, ToolCall};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use connect_llm::{DebugTrace, GeneratedImage, ThinkingOutput, ToolCall};
 use crossterm::{
     cursor::{MoveToColumn, MoveUp},
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
-use std::io::{self, Write};
+use std::{
+    collections::HashSet,
+    fs,
+    io::{self, Write},
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub(crate) fn print_thinking(thinking: Option<&ThinkingOutput>) {
     let Some(thinking) = thinking else {
@@ -44,6 +51,43 @@ pub(crate) fn print_debug_trace(debug: Option<&DebugTrace>) {
     if let Some(response) = &debug.response {
         eprintln!("{}", response.trim_end());
     }
+}
+
+pub(crate) fn persist_generated_images(images: &[GeneratedImage]) -> Result<(), io::Error> {
+    if images.is_empty() {
+        return Ok(());
+    }
+
+    let output_dir = PathBuf::from("generated_images");
+    fs::create_dir_all(&output_dir)?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let mut seen_image_keys = HashSet::new();
+    let mut next_index = 0usize;
+
+    for image in images {
+        if !seen_image_keys.insert(image.dedup_key()) {
+            continue;
+        }
+
+        if let Some(data_base64) = &image.data_base64 {
+            let bytes = STANDARD.decode(data_base64).map_err(io::Error::other)?;
+            let extension = detect_image_extension(image.mime_type.as_deref(), &bytes);
+            let path = output_dir.join(format!("image-{}-{}.{}", timestamp, next_index, extension));
+            fs::write(&path, bytes)?;
+            println!("image> {}", path.display());
+            next_index += 1;
+            continue;
+        }
+
+        if let Some(url) = &image.url {
+            println!("image url> {}", url);
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) fn prompt(label: &str, hint: &str) -> Result<String, io::Error> {
@@ -151,4 +195,37 @@ fn render_multiline_prompt(
     stdout.flush()?;
     *rendered_lines = lines.len();
     Ok(())
+}
+
+fn detect_image_extension(mime_type: Option<&str>, bytes: &[u8]) -> &'static str {
+    if let Some(mime_type) = mime_type {
+        let mime_type = mime_type.to_ascii_lowercase();
+        if mime_type.contains("png") {
+            return "png";
+        }
+        if mime_type.contains("jpeg") || mime_type.contains("jpg") {
+            return "jpg";
+        }
+        if mime_type.contains("webp") {
+            return "webp";
+        }
+        if mime_type.contains("gif") {
+            return "gif";
+        }
+    }
+
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return "png";
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return "jpg";
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return "webp";
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return "gif";
+    }
+
+    "bin"
 }

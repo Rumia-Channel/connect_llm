@@ -3,7 +3,8 @@ mod settings;
 mod streaming;
 
 use self::io::{
-    print_debug_trace, print_thinking, print_tool_calls, prompt, prompt_default, prompt_multiline,
+    persist_generated_images, print_debug_trace, print_thinking, print_tool_calls, prompt,
+    prompt_default, prompt_multiline,
 };
 use self::settings::{
     build_thinking_config, describe_codex_effort, ensure_provider_auth_ready, parse_codex_effort,
@@ -215,6 +216,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if thinking_enabled {
                         print_thinking(response.thinking.as_ref());
                     }
+                    if let Err(error) = persist_generated_images(&response.images) {
+                        println!("image output error> {}", error);
+                    }
                     print_tool_calls(&response.tool_calls);
                     if let Some(compaction) = &compaction {
                         println!(
@@ -228,6 +232,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if debug_enabled {
                     print_debug_trace(response.debug.as_ref());
+                }
+                if use_stream {
+                    if let Err(error) = persist_generated_images(&response.images) {
+                        println!("image output error> {}", error);
+                    }
                 }
 
                 messages.push(Message {

@@ -1,6 +1,6 @@
 [package]
 name = "connect_llm"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Rust library for using multiple LLM providers through a unified API"
 readme = "README.md"
@@ -13,6 +13,7 @@ sample-cli = ["dep:crossterm", "dep:tokio"]
 [dependencies]
 async-stream = "0.3"
 async-trait = "0.1"
+base64 = "0.22"
 crossterm = { version = "0.28", optional = true }
 futures-util = "0.3"
 rand = "0.8"

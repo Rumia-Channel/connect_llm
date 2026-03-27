@@ -238,6 +238,7 @@ impl AiClient for AnthropicClient {
                 delta: String::new(),
                 thinking_delta: None,
                 thinking_signature: None,
+                images: Vec::new(),
                 tool_call_deltas: Vec::new(),
                 done: true,
                 debug: request_debug.map(|request| DebugTrace {

@@ -2,7 +2,7 @@ pub mod ai;
 pub mod context;
 
 pub use ai::{
-    AiClient, AiConfig, AiError, AiProvider, ChatRequest, ChatResponse, DebugTrace,
+    AiClient, AiConfig, AiError, AiProvider, ChatRequest, ChatResponse, DebugTrace, GeneratedImage,
     GitHubCopilotDeviceAuth, GitHubCopilotDeviceAuthOptions, Message, OpenAiCodexBrowserAuth,
     OpenAiCodexBrowserAuthOptions, StreamChunk, ThinkingConfig, ThinkingDisplay, ThinkingEffort,
     ThinkingOutput, ToolCall, ToolCallDelta, ToolChoice, ToolDefinition, Usage,

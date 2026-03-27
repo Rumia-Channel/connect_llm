@@ -30,6 +30,8 @@ pub(super) struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_data: Option<GeminiInlineData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thought: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
@@ -37,6 +39,14 @@ pub(super) struct GeminiPart {
     pub function_call: Option<GeminiFunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_response: Option<GeminiFunctionResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct GeminiInlineData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

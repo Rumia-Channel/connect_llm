@@ -189,6 +189,7 @@ impl AiClient for GitHubCopilotClient {
                             delta: String::new(),
                             thinking_delta: None,
                             thinking_signature: None,
+                            images: Vec::new(),
                             tool_call_deltas: Vec::new(),
                             done: true,
                             debug: if request_debug.is_some() || response_debug.is_some() {
@@ -221,6 +222,7 @@ impl AiClient for GitHubCopilotClient {
                             delta,
                             thinking_delta,
                             thinking_signature,
+                            images: Vec::new(),
                             tool_call_deltas,
                             done,
                             debug: if request_debug.is_some() || response_debug.is_some() {
@@ -244,6 +246,7 @@ impl AiClient for GitHubCopilotClient {
                 delta: String::new(),
                 thinking_delta: None,
                 thinking_signature: None,
+                images: Vec::new(),
                 tool_call_deltas: Vec::new(),
                 done: true,
                 debug: request_debug.map(|request| DebugTrace {

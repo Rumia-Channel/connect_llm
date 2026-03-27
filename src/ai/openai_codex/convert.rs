@@ -225,6 +225,7 @@ pub(super) fn convert_response(
             output_tokens: usage.output_tokens,
         },
         thinking: extract_thinking_from_output(&response.output),
+        images: Vec::new(),
         tool_calls: extract_tool_calls_from_output(&response.output),
         debug: if request_debug.is_some() || response_debug.is_some() {
             Some(DebugTrace {

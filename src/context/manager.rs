@@ -565,6 +565,7 @@ mod tests {
                         output_tokens: 10,
                     },
                     thinking: None,
+                    images: Vec::new(),
                     tool_calls: Vec::new(),
                     debug: None,
                 });
@@ -578,6 +579,7 @@ mod tests {
                     output_tokens: 10,
                 },
                 thinking: None,
+                images: Vec::new(),
                 tool_calls: Vec::new(),
                 debug: None,
             })

@@ -26,6 +26,7 @@ connect_llm = { git = "https://github.com/Rumia-Channel/connect_llm.git" }
 - Thinking の取得
 - provider に応じた Thinking 設定の送信
 - Tool Use の定義送信と tool call / tool result の送受信
+- Gemini native で返ってきた画像出力の受信
 
 ## 公開 API
 
@@ -37,6 +38,7 @@ connect_llm = { git = "https://github.com/Rumia-Channel/connect_llm.git" }
 - `ChatRequest`
 - `ChatResponse`
 - `DebugTrace`
+- `GeneratedImage`
 - `ContextManager`
 - `ContextManagerConfig`
 - `PreparedChatRequest`
@@ -197,6 +199,33 @@ if let Some(thinking) = &response.thinking {
 - `text`: 人間が読める thinking 本文または要約
 - `signature`: Anthropic 系の署名付き thinking や GitHub Copilot の `reasoning_opaque` に使う値
 - `redacted`: Anthropic 系の `redacted_thinking`
+
+## 画像出力の受信
+
+現時点では、専用の画像生成 API を大きく増やすのではなく、既存の応答経路で返ってきた画像を `ChatResponse.images` / `StreamChunk.images` で受け取れるようにしています。
+
+```rust
+let response = client.chat(request).await?;
+
+for image in &response.images {
+    if let Some(mime_type) = &image.mime_type {
+        println!("mime: {}", mime_type);
+    }
+    if let Some(data_base64) = &image.data_base64 {
+        println!("got image bytes: {} chars", data_base64.len());
+    }
+    if let Some(url) = &image.url {
+        println!("image url: {}", url);
+    }
+}
+```
+
+`GeneratedImage` の意味は次の通りです。
+
+- `mime_type`: 画像 MIME type
+- `data_base64`: base64 化された画像本体
+- `url`: provider が URL を返した場合の参照先
+- `revised_prompt`: provider が prompt 書き換えを返した場合の値
 
 ## Tool Use
 
@@ -438,8 +467,10 @@ println!("{}", provider.supports_tools());
 
 - `AiProvider::GoogleAiStudio` は `https://generativelanguage.googleapis.com/v1beta/openai` の OpenAI compatibility を使います。
 - `AiProvider::Gemini` は `generateContent` / `streamGenerateContent` を使う native Gemini API です。
+- `AiProvider::Gemini` は画像対応モデルを選んだ場合、`inlineData` を `ChatResponse.images` / `StreamChunk.images` として受け取れます。
 - `AiProvider::Grok` は `https://api.x.ai/v1` の OpenAI compatibility を使います。
 - `AiProvider::Grok` の default model は `grok-4` です。`list_models()` が使える場合は `grok-4-1-fast-reasoning` や `grok-code-fast-1` などへ切り替えられます。
+- `AiProvider::Grok` の `chat/completions` はテキスト系の transport として扱っています。`grok-imagine-image` などの専用 image generation model は、別 endpoint の画像生成 API 側の話なので、この `chat()` / `chat_stream()` では受信対象にしていません。
 - `AiProvider::Grok` は Tool Use を使えますが、thinking の request-side 設定は送っていません。モデルによっては stream 時に `reasoning_content` が返ることがあります。
 - `AiProvider::GitHubCopilot` は `chat/completions` を使う Copilot の OpenAI-compatible endpoint を叩きます。
 - `AiProvider::GitHubCopilot` は request header に `Openai-Intent: conversation-edits` と `x-initiator` を付けます。ここは `opencode` の実装に合わせています。

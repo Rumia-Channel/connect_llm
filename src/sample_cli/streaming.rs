@@ -1,6 +1,11 @@
-use connect_llm::{ChatRequest, ChatResponse, DebugTrace, ThinkingOutput, ToolCall, Usage};
+use connect_llm::{
+    ChatRequest, ChatResponse, DebugTrace, GeneratedImage, ThinkingOutput, ToolCall, Usage,
+};
 use futures_util::StreamExt;
-use std::io::{self, Write};
+use std::{
+    collections::HashSet,
+    io::{self, Write},
+};
 
 pub(crate) async fn send_request(
     client: &dyn connect_llm::AiClient,
@@ -22,6 +27,8 @@ pub(crate) async fn send_request(
     let mut thinking_text = String::new();
     let mut thinking_signature: Option<String> = None;
     let mut tool_calls: Vec<(Option<String>, Option<String>, String)> = Vec::new();
+    let mut images: Vec<GeneratedImage> = Vec::new();
+    let mut seen_image_keys: HashSet<String> = HashSet::new();
     let mut printed_assistant_prefix = false;
     let mut printed_thinking_prefix = false;
     let mut debug_request: Option<String> = None;
@@ -54,6 +61,13 @@ pub(crate) async fn send_request(
                 if let Some(arguments) = tool_call_delta.arguments {
                     entry.2.push_str(&arguments);
                 }
+            }
+        }
+
+        for image in chunk.images {
+            let key = image.dedup_key();
+            if seen_image_keys.insert(key) {
+                images.push(image);
             }
         }
 
@@ -118,6 +132,7 @@ pub(crate) async fn send_request(
         } else {
             None
         },
+        images,
         tool_calls: tool_calls
             .into_iter()
             .enumerate()

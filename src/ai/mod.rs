@@ -143,6 +143,7 @@ pub struct StreamChunk {
     pub delta: String,
     pub thinking_delta: Option<String>,
     pub thinking_signature: Option<String>,
+    pub images: Vec<GeneratedImage>,
     pub tool_call_deltas: Vec<ToolCallDelta>,
     pub done: bool,
     pub debug: Option<DebugTrace>,
@@ -190,6 +191,8 @@ pub struct ChatResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<GeneratedImage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debug: Option<DebugTrace>,
@@ -207,6 +210,37 @@ pub struct DebugTrace {
     pub request: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GeneratedImage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revised_prompt: Option<String>,
+}
+
+impl GeneratedImage {
+    pub fn is_empty(&self) -> bool {
+        self.mime_type.is_none()
+            && self.data_base64.is_none()
+            && self.url.is_none()
+            && self.revised_prompt.is_none()
+    }
+
+    pub fn dedup_key(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.mime_type.as_deref().unwrap_or_default(),
+            self.data_base64.as_deref().unwrap_or_default(),
+            self.url.as_deref().unwrap_or_default(),
+            self.revised_prompt.as_deref().unwrap_or_default(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

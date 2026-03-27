@@ -5,8 +5,8 @@ use super::protocol::{
     GeminiUsageMetadata,
 };
 use crate::ai::{
-    ChatRequest, ChatResponse, DebugTrace, Message, ThinkingOutput, ToolCall, ToolChoice,
-    ToolDefinition, Usage,
+    ChatRequest, ChatResponse, DebugTrace, GeneratedImage, Message, ThinkingOutput, ToolCall,
+    ToolChoice, ToolDefinition, Usage,
 };
 use serde_json::{Map, Value};
 
@@ -94,6 +94,7 @@ fn convert_message(message: Message) -> GeminiContent {
             if let Some(text) = &thinking.text {
                 parts.push(GeminiPart {
                     text: Some(text.clone()),
+                    inline_data: None,
                     thought: Some(true),
                     thought_signature: None,
                     function_call: None,
@@ -106,6 +107,7 @@ fn convert_message(message: Message) -> GeminiContent {
     for tool_call in tool_calls {
         parts.push(GeminiPart {
             text: None,
+            inline_data: None,
             thought: None,
             thought_signature: None,
             function_call: Some(GeminiFunctionCall {
@@ -119,6 +121,7 @@ fn convert_message(message: Message) -> GeminiContent {
     if role == "tool" {
         parts.push(GeminiPart {
             text: None,
+            inline_data: None,
             thought: None,
             thought_signature: None,
             function_call: None,
@@ -137,6 +140,7 @@ fn convert_message(message: Message) -> GeminiContent {
     if role != "tool" || !content.is_empty() {
         parts.push(GeminiPart {
             text: Some(content),
+            inline_data: None,
             thought: None,
             thought_signature,
             function_call: None,
@@ -155,6 +159,7 @@ fn convert_system_instruction(system: String) -> GeminiContent {
         role: Some("system".to_string()),
         parts: vec![GeminiPart {
             text: Some(system),
+            inline_data: None,
             thought: None,
             thought_signature: None,
             function_call: None,
@@ -199,10 +204,11 @@ pub(super) fn convert_request(request: ChatRequest) -> GeminiRequest {
 
 pub(super) fn parse_candidate(
     candidate: &GeminiCandidate,
-) -> (String, ThinkingOutput, Vec<ToolCall>) {
+) -> (String, ThinkingOutput, Vec<ToolCall>, Vec<GeneratedImage>) {
     let mut content = String::new();
     let mut thinking = ThinkingOutput::default();
     let mut tool_calls = Vec::new();
+    let mut images = Vec::new();
 
     if let Some(candidate_content) = &candidate.content {
         for part in &candidate_content.parts {
@@ -215,6 +221,16 @@ pub(super) fn parse_candidate(
                     id: format!("gemini-call-{}", tool_calls.len()),
                     name: function_call.name.clone(),
                     arguments: function_call.args.clone(),
+                });
+                continue;
+            }
+
+            if let Some(inline_data) = &part.inline_data {
+                images.push(GeneratedImage {
+                    mime_type: inline_data.mime_type.clone(),
+                    data_base64: Some(inline_data.data.clone()),
+                    url: None,
+                    revised_prompt: None,
                 });
                 continue;
             }
@@ -234,7 +250,7 @@ pub(super) fn parse_candidate(
         }
     }
 
-    (content, thinking, tool_calls)
+    (content, thinking, tool_calls, images)
 }
 
 pub(super) fn convert_response(
@@ -244,9 +260,14 @@ pub(super) fn convert_response(
     response_debug: Option<String>,
 ) -> ChatResponse {
     let candidate = response.candidates.first();
-    let (content, thinking, tool_calls) = match candidate {
+    let (content, thinking, tool_calls, images) = match candidate {
         Some(candidate) => parse_candidate(candidate),
-        None => (String::new(), ThinkingOutput::default(), Vec::new()),
+        None => (
+            String::new(),
+            ThinkingOutput::default(),
+            Vec::new(),
+            Vec::new(),
+        ),
     };
 
     let thinking = if thinking.is_empty() {
@@ -272,6 +293,7 @@ pub(super) fn convert_response(
             output_tokens: usage.candidates_token_count + usage.thoughts_token_count.unwrap_or(0),
         },
         thinking,
+        images,
         tool_calls,
         debug: if request_debug.is_some() || response_debug.is_some() {
             Some(DebugTrace {
@@ -281,5 +303,42 @@ pub(super) fn convert_response(
         } else {
             None
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_candidate;
+    use crate::ai::gemini::protocol::{
+        GeminiCandidate, GeminiContent, GeminiInlineData, GeminiPart,
+    };
+
+    #[test]
+    fn parse_candidate_extracts_inline_images() {
+        let candidate = GeminiCandidate {
+            content: Some(GeminiContent {
+                role: Some("model".to_string()),
+                parts: vec![GeminiPart {
+                    text: None,
+                    inline_data: Some(GeminiInlineData {
+                        mime_type: Some("image/png".to_string()),
+                        data: "aGVsbG8=".to_string(),
+                    }),
+                    thought: None,
+                    thought_signature: None,
+                    function_call: None,
+                    function_response: None,
+                }],
+            }),
+            finish_reason: Some("STOP".to_string()),
+        };
+
+        let (content, thinking, tool_calls, images) = parse_candidate(&candidate);
+        assert!(content.is_empty());
+        assert!(thinking.is_empty());
+        assert!(tool_calls.is_empty());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(images[0].data_base64.as_deref(), Some("aGVsbG8="));
     }
 }

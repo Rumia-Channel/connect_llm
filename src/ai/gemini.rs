@@ -11,6 +11,7 @@ use super::{
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
+use std::collections::HashSet;
 pub struct GeminiClient {
     client: Client,
     config: AiConfig,
@@ -143,6 +144,7 @@ impl AiClient for GeminiClient {
 
             let mut byte_stream = response.bytes_stream();
             let mut buffer = String::new();
+            let mut seen_image_keys: HashSet<String> = HashSet::new();
             while let Some(chunk_result) = byte_stream.next().await {
                 let chunk = match chunk_result {
                     Ok(chunk) => chunk,
@@ -179,13 +181,19 @@ impl AiClient for GeminiClient {
                         continue;
                     };
 
-                    let (content, thinking, tool_calls) = convert::parse_candidate(candidate);
+                    let (content, thinking, tool_calls, images) =
+                        convert::parse_candidate(candidate);
+                    let images: Vec<_> = images
+                        .into_iter()
+                        .filter(|image| seen_image_keys.insert(image.dedup_key()))
+                        .collect();
 
                     if let Some(thinking_text) = thinking.text {
                         yield Ok(StreamChunk {
                             delta: String::new(),
                             thinking_delta: Some(thinking_text),
                             thinking_signature: None,
+                            images: Vec::new(),
                             tool_call_deltas: Vec::new(),
                             done: false,
                             debug: if request_debug.is_some() || response_debug.is_some() {
@@ -204,6 +212,7 @@ impl AiClient for GeminiClient {
                             delta: String::new(),
                             thinking_delta: None,
                             thinking_signature: Some(signature),
+                            images: Vec::new(),
                             tool_call_deltas: Vec::new(),
                             done: false,
                             debug: if request_debug.is_some() || response_debug.is_some() {
@@ -222,6 +231,7 @@ impl AiClient for GeminiClient {
                             delta: String::new(),
                             thinking_delta: None,
                             thinking_signature: None,
+                            images: Vec::new(),
                             tool_call_deltas: tool_calls
                                 .into_iter()
                                 .enumerate()
@@ -244,11 +254,31 @@ impl AiClient for GeminiClient {
                         });
                     }
 
+                    if !images.is_empty() {
+                        yield Ok(StreamChunk {
+                            delta: String::new(),
+                            thinking_delta: None,
+                            thinking_signature: None,
+                            images,
+                            tool_call_deltas: Vec::new(),
+                            done: false,
+                            debug: if request_debug.is_some() || response_debug.is_some() {
+                                Some(DebugTrace {
+                                    request: request_debug.take(),
+                                    response: response_debug.clone(),
+                                })
+                            } else {
+                                None
+                            },
+                        });
+                    }
+
                     if !content.is_empty() {
                         yield Ok(StreamChunk {
                             delta: content,
                             thinking_delta: None,
                             thinking_signature: None,
+                            images: Vec::new(),
                             tool_call_deltas: Vec::new(),
                             done: false,
                             debug: if request_debug.is_some() || response_debug.is_some() {
@@ -267,6 +297,7 @@ impl AiClient for GeminiClient {
                             delta: String::new(),
                             thinking_delta: None,
                             thinking_signature: None,
+                            images: Vec::new(),
                             tool_call_deltas: Vec::new(),
                             done: true,
                             debug: if request_debug.is_some() || response_debug.is_some() {
@@ -288,6 +319,7 @@ impl AiClient for GeminiClient {
                 delta: String::new(),
                 thinking_delta: None,
                 thinking_signature: None,
+                images: Vec::new(),
                 tool_call_deltas: Vec::new(),
                 done: true,
                 debug: request_debug.map(|request| DebugTrace {
