@@ -6,7 +6,7 @@ use super::protocol::{
 };
 use crate::ai::{
     ChatRequest, ChatResponse, DebugTrace, ThinkingConfig, ThinkingEffort, ThinkingOutput,
-    ToolCall, ToolChoice, Usage, message_tool_result_value, parse_tool_arguments, request_policy,
+    ToolCall, ToolChoice, Usage, message_tool_result_value, parse_tool_arguments, providers,
     serialize_tool_arguments,
 };
 
@@ -96,7 +96,8 @@ pub(super) fn convert_request(request: ChatRequest, stream: bool) -> OpenAiCodex
         system,
         thinking,
     } = request;
-    let temperature = request_policy::sanitize_codex_temperature(&model, temperature);
+    let request_policy = providers::openai_codex::spec().request_policy(&model);
+    let temperature = request_policy.sanitize_temperature(temperature);
 
     let mut input = Vec::new();
 

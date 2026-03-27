@@ -5,7 +5,7 @@ use super::protocol::{
 };
 use crate::ai::{
     ChatRequest, ChatResponse, DebugTrace, Message, ThinkingEffort, ThinkingOutput, ToolCall,
-    ToolChoice, ToolDefinition, Usage, request_policy, serialize_tool_arguments,
+    ToolChoice, ToolDefinition, Usage, providers, serialize_tool_arguments,
 };
 use serde_json::{Value, json};
 
@@ -110,7 +110,8 @@ pub(super) fn convert_request(request: ChatRequest, stream: bool) -> GitHubCopil
         system,
         thinking,
     } = request;
-    let temperature = request_policy::sanitize_github_copilot_temperature(&model, temperature);
+    let request_policy = providers::github_copilot::spec().request_policy(&model);
+    let temperature = request_policy.sanitize_temperature(temperature);
 
     let mut messages = Vec::new();
 
@@ -166,10 +167,8 @@ pub(super) fn convert_request(request: ChatRequest, stream: bool) -> GitHubCopil
         .as_ref()
         .and_then(|thinking| thinking.enabled.then_some(thinking.budget_tokens))
         .flatten();
-    let reasoning_effort =
-        request_policy::sanitize_github_copilot_reasoning_effort(&model, reasoning_effort);
-    let thinking_budget =
-        request_policy::sanitize_github_copilot_thinking_budget(&model, thinking_budget);
+    let reasoning_effort = request_policy.sanitize_reasoning_effort(reasoning_effort);
+    let thinking_budget = request_policy.sanitize_thinking_budget(thinking_budget);
 
     GitHubCopilotRequest {
         model,

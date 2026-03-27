@@ -1,4 +1,4 @@
-use super::{ApiStyle, ProviderSpec};
+use super::{ApiStyle, ProviderSpec, RequestPolicyProfile};
 
 pub fn spec() -> ProviderSpec {
     ProviderSpec {
@@ -8,6 +8,7 @@ pub fn spec() -> ProviderSpec {
         supports_thinking_output: true,
         supports_thinking_config: true,
         supports_tools: true,
+        request_policy_profile: RequestPolicyProfile::ZAi,
         api_style: ApiStyle::OpenAi,
     }
 }
