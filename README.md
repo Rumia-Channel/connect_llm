@@ -326,7 +326,7 @@ let thinking = ThinkingConfig {
 | `AiProvider::GoogleAiStudio` | OpenAI-compatible | No | Yes | Yes |
 | `AiProvider::Gemini` | Gemini native | Yes | Yes | Yes |
 | `AiProvider::OpenAi` | OpenAI-compatible | No | No | Yes |
-| `AiProvider::OpenAiCodex` | ChatGPT Codex backend | Yes | Yes | No |
+| `AiProvider::OpenAiCodex` | ChatGPT Codex backend | Yes | Yes | Yes |
 | `AiProvider::Sakura` | OpenAI-compatible | Yes | No | Yes |
 | `AiProvider::Kimi` | OpenAI-compatible | Yes | Yes | Yes |
 | `AiProvider::KimiCoding` | Anthropic | Yes | Yes | Yes |
@@ -364,7 +364,7 @@ println!("{}", provider.supports_tools());
 - `AiProvider::GitHubCopilot` は `ChatRequest.thinking.effort` を `reasoning_effort` として、`budget_tokens` を `thinking_budget` として送ります。
 - `AiProvider::OpenAi` は現状 `chat.completions` ベースです。Thinking は公開 capability としては `false` 扱いです。
 - `AiProvider::OpenAiCodex` は `https://chatgpt.com/backend-api/codex/responses` を使います。
-- `AiProvider::OpenAiCodex` の Tool Use はまだ未実装です。`ChatRequest.tools` や tool result を渡すとエラーを返します。
+- `AiProvider::OpenAiCodex` は OpenAI Responses item 互換の `function_call` / `function_call_output` として Tool Use を扱います。
 - `AiProvider::OpenAiCodex` の `api_key` は通常の OpenAI API key ではなく、ChatGPT OAuth の access token として扱います。
 - `AiProvider::OpenAiCodex` では `api_key` を空にすると `CODEX_HOME/auth.json` または `~/.codex/auth.json` から access token / refresh token を読みます。
 - `AiProvider::OpenAiCodex` は access token の期限が近い場合、`refresh_token` を使って `auth.openai.com/oauth/token` で更新し、`auth.json` へ書き戻します。

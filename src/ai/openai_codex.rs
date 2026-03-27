@@ -2,7 +2,9 @@
 
 use super::{
     AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    ThinkingConfig, ThinkingEffort, ThinkingOutput, Usage, capture_debug_json, capture_debug_text,
+    ThinkingConfig, ThinkingEffort, ThinkingOutput, ToolCall, ToolCallDelta, ToolChoice, Usage,
+    capture_debug_json, capture_debug_text, message_tool_result_value, parse_tool_arguments,
+    serialize_tool_arguments,
 };
 use futures_util::StreamExt;
 use rand::{RngCore, rngs::OsRng};
@@ -10,6 +12,7 @@ use reqwest::{Client, Url, blocking::Client as BlockingClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -94,13 +97,17 @@ pub struct OpenAiCodexBrowserAuth {
 struct OpenAiCodexRequest {
     model: String,
     instructions: String,
-    input: Vec<OpenAiCodexInputMessage>,
+    input: Vec<OpenAiCodexInputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<OpenAiCodexReasoningRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAiCodexTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<OpenAiCodexToolChoice>,
     stream: bool,
     store: bool,
 }
@@ -114,9 +121,55 @@ struct OpenAiCodexReasoningRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+enum OpenAiCodexInputItem {
+    Message(OpenAiCodexInputMessage),
+    FunctionCall(OpenAiCodexFunctionCallItem),
+    FunctionCallOutput(OpenAiCodexFunctionCallOutputItem),
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct OpenAiCodexInputMessage {
     role: String,
     content: Vec<OpenAiCodexInputContent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiCodexFunctionCallItem {
+    #[serde(rename = "type")]
+    item_type: &'static str,
+    call_id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiCodexFunctionCallOutputItem {
+    #[serde(rename = "type")]
+    item_type: &'static str,
+    call_id: String,
+    output: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiCodexTool {
+    #[serde(rename = "type")]
+    tool_type: &'static str,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+enum OpenAiCodexToolChoice {
+    Mode(&'static str),
+    Function {
+        #[serde(rename = "type")]
+        choice_type: &'static str,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +193,18 @@ struct OpenAiCodexInputContent {
 struct OpenAiCodexOutputItem {
     #[serde(rename = "type")]
     item_type: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    call_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    encrypted_content: Option<String>,
     #[serde(default)]
     content: Vec<OpenAiCodexOutputContent>,
     #[serde(default)]
@@ -177,11 +242,37 @@ struct OpenAiCodexEvent {
     #[serde(rename = "type")]
     event_type: String,
     #[serde(default)]
+    output_index: Option<usize>,
+    #[serde(default)]
+    item_id: Option<String>,
+    #[serde(default)]
+    summary_index: Option<usize>,
+    #[serde(default)]
     delta: Option<String>,
+    #[serde(default)]
+    item: Option<OpenAiCodexOutputItem>,
     #[serde(default)]
     response: Option<OpenAiCodexResponse>,
     #[serde(default)]
     text: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PendingToolCallState {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+    saw_argument_delta: bool,
+}
+
+impl PendingToolCallState {
+    fn into_tool_call(self, index: usize) -> Option<ToolCall> {
+        Some(ToolCall {
+            id: self.id.unwrap_or_else(|| format!("tool-call-{}", index)),
+            name: self.name?,
+            arguments: parse_tool_arguments(&self.arguments),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -957,24 +1048,43 @@ impl OpenAiCodexClient {
         "You are a helpful assistant.".to_string()
     }
 
-    fn uses_tool_features(request: &ChatRequest) -> bool {
-        !request.tools.is_empty()
-            || request.tool_choice.is_some()
-            || request.messages.iter().any(|message| {
-                !message.tool_calls.is_empty()
-                    || message.tool_call_id.is_some()
-                    || message.tool_name.is_some()
-                    || message.tool_result.is_some()
-                    || message.tool_error.is_some()
-            })
+    fn convert_tools(tools: Vec<super::ToolDefinition>) -> Option<Vec<OpenAiCodexTool>> {
+        if tools.is_empty() {
+            return None;
+        }
+
+        Some(
+            tools
+                .into_iter()
+                .map(|tool| OpenAiCodexTool {
+                    tool_type: "function",
+                    name: tool.name,
+                    description: tool.description,
+                    parameters: tool.input_schema,
+                })
+                .collect(),
+        )
+    }
+
+    fn convert_tool_choice(tool_choice: Option<ToolChoice>) -> Option<OpenAiCodexToolChoice> {
+        match tool_choice {
+            None => None,
+            Some(ToolChoice::Auto) => Some(OpenAiCodexToolChoice::Mode("auto")),
+            Some(ToolChoice::None) => Some(OpenAiCodexToolChoice::Mode("none")),
+            Some(ToolChoice::Required) => Some(OpenAiCodexToolChoice::Mode("required")),
+            Some(ToolChoice::Tool(name)) => Some(OpenAiCodexToolChoice::Function {
+                choice_type: "function",
+                name,
+            }),
+        }
     }
 
     fn convert_request(request: ChatRequest, stream: bool) -> OpenAiCodexRequest {
         let ChatRequest {
             model,
             messages: request_messages,
-            tools: _,
-            tool_choice: _,
+            tools,
+            tool_choice,
             max_tokens: _,
             temperature,
             system,
@@ -984,28 +1094,46 @@ impl OpenAiCodexClient {
         let mut input = Vec::new();
 
         for message in request_messages {
-            let super::Message {
-                role,
-                content,
-                thinking: _,
-                tool_calls: _,
-                tool_call_id: _,
-                tool_name: _,
-                tool_result: _,
-                tool_error: _,
-            } = message;
-            let content_type = if role == "assistant" {
-                "output_text"
-            } else {
-                "input_text"
-            };
-            input.push(OpenAiCodexInputMessage {
-                role,
-                content: vec![OpenAiCodexInputContent {
-                    content_type,
-                    text: content,
-                }],
-            });
+            if message.role == "tool" {
+                if let Some(call_id) = message.tool_call_id.clone() {
+                    let output = serialize_tool_arguments(&message_tool_result_value(&message));
+
+                    input.push(OpenAiCodexInputItem::FunctionCallOutput(
+                        OpenAiCodexFunctionCallOutputItem {
+                            item_type: "function_call_output",
+                            call_id,
+                            output,
+                        },
+                    ));
+                }
+                continue;
+            }
+
+            if !message.content.is_empty() {
+                let content_type = if message.role == "assistant" {
+                    "output_text"
+                } else {
+                    "input_text"
+                };
+                input.push(OpenAiCodexInputItem::Message(OpenAiCodexInputMessage {
+                    role: message.role.clone(),
+                    content: vec![OpenAiCodexInputContent {
+                        content_type,
+                        text: message.content.clone(),
+                    }],
+                }));
+            }
+
+            for tool_call in message.tool_calls {
+                input.push(OpenAiCodexInputItem::FunctionCall(
+                    OpenAiCodexFunctionCallItem {
+                        item_type: "function_call",
+                        call_id: tool_call.id,
+                        name: tool_call.name,
+                        arguments: serialize_tool_arguments(&tool_call.arguments),
+                    },
+                ));
+            }
         }
 
         OpenAiCodexRequest {
@@ -1015,6 +1143,8 @@ impl OpenAiCodexClient {
             max_output_tokens: None,
             temperature,
             reasoning: Self::convert_reasoning_config(thinking.as_ref()),
+            tools: Self::convert_tools(tools),
+            tool_choice: Self::convert_tool_choice(tool_choice),
             stream,
             store: false,
         }
@@ -1045,10 +1175,30 @@ impl OpenAiCodexClient {
         } else {
             Some(ThinkingOutput {
                 text: Some(text),
-                signature: None,
+                signature: output
+                    .iter()
+                    .find(|item| item.item_type == "reasoning")
+                    .and_then(|item| item.encrypted_content.clone()),
                 redacted: None,
             })
         }
+    }
+
+    fn extract_tool_calls_from_output(output: &[OpenAiCodexOutputItem]) -> Vec<ToolCall> {
+        output
+            .iter()
+            .filter(|item| item.item_type == "function_call")
+            .filter_map(|item| {
+                let id = item.call_id.clone().or_else(|| item.id.clone())?;
+                let name = item.name.clone()?;
+                let arguments = item.arguments.as_deref().map(parse_tool_arguments)?;
+                Some(ToolCall {
+                    id,
+                    name,
+                    arguments,
+                })
+            })
+            .collect()
     }
 
     fn convert_response(
@@ -1067,7 +1217,7 @@ impl OpenAiCodexClient {
                 output_tokens: usage.output_tokens,
             },
             thinking: Self::extract_thinking_from_output(&response.output),
-            tool_calls: Vec::new(),
+            tool_calls: Self::extract_tool_calls_from_output(&response.output),
             debug: if request_debug.is_some() || response_debug.is_some() {
                 Some(DebugTrace {
                     request: request_debug,
@@ -1164,11 +1314,6 @@ fn percent_encode_component(input: &str) -> String {
 #[async_trait::async_trait]
 impl AiClient for OpenAiCodexClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
-        if Self::uses_tool_features(&request) {
-            return Err(AiError::Api(
-                "OpenAI Codex tool use is not implemented in this library yet.".to_string(),
-            ));
-        }
         let auth = self.resolve_auth().await?;
         let url = Self::endpoint_url(&self.config.base_url);
         let request = Self::convert_request(request, true);
@@ -1208,6 +1353,8 @@ impl AiClient for OpenAiCodexClient {
 
         let mut content = String::new();
         let mut thinking_text = String::new();
+        let mut thinking_signature: Option<String> = None;
+        let mut pending_tool_calls: HashMap<usize, PendingToolCallState> = HashMap::new();
         let mut final_response: Option<OpenAiCodexResponse> = None;
 
         for raw_line in body.lines() {
@@ -1235,6 +1382,48 @@ impl AiClient for OpenAiCodexClient {
                         thinking_text.push_str(&delta);
                     }
                 }
+                "response.output_item.added" => {
+                    if let (Some(output_index), Some(item)) = (event.output_index, event.item) {
+                        if item.item_type == "function_call" {
+                            let pending = pending_tool_calls.entry(output_index).or_default();
+                            if let Some(call_id) = item.call_id.or(item.id) {
+                                pending.id = Some(call_id);
+                            }
+                            if let Some(name) = item.name {
+                                pending.name = Some(name);
+                            }
+                        } else if item.item_type == "reasoning" && thinking_signature.is_none() {
+                            thinking_signature = item.encrypted_content;
+                        }
+                    }
+                }
+                "response.output_item.done" => {
+                    if let (Some(output_index), Some(item)) = (event.output_index, event.item) {
+                        if item.item_type == "function_call" {
+                            let pending = pending_tool_calls.entry(output_index).or_default();
+                            if let Some(call_id) = item.call_id.or(item.id) {
+                                pending.id = Some(call_id);
+                            }
+                            if let Some(name) = item.name {
+                                pending.name = Some(name);
+                            }
+                            if !pending.saw_argument_delta {
+                                if let Some(arguments) = item.arguments {
+                                    pending.arguments = arguments;
+                                }
+                            }
+                        } else if item.item_type == "reasoning" && thinking_signature.is_none() {
+                            thinking_signature = item.encrypted_content;
+                        }
+                    }
+                }
+                "response.function_call_arguments.delta" => {
+                    if let (Some(output_index), Some(delta)) = (event.output_index, event.delta) {
+                        let pending = pending_tool_calls.entry(output_index).or_default();
+                        pending.saw_argument_delta = true;
+                        pending.arguments.push_str(&delta);
+                    }
+                }
                 "response.completed" => {
                     final_response = event.response;
                 }
@@ -1252,9 +1441,19 @@ impl AiClient for OpenAiCodexClient {
         if response.thinking.is_none() && !thinking_text.is_empty() {
             response.thinking = Some(ThinkingOutput {
                 text: Some(thinking_text),
-                signature: None,
+                signature: thinking_signature.clone(),
                 redacted: None,
             });
+        } else if let Some(thinking) = response.thinking.as_mut() {
+            if thinking.signature.is_none() {
+                thinking.signature = thinking_signature;
+            }
+        }
+        if response.tool_calls.is_empty() {
+            response.tool_calls = pending_tool_calls
+                .into_iter()
+                .filter_map(|(index, pending)| pending.into_tool_call(index))
+                .collect();
         }
 
         Ok(response)
@@ -1264,14 +1463,6 @@ impl AiClient for OpenAiCodexClient {
         &self,
         request: ChatRequest,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
-        if Self::uses_tool_features(&request) {
-            let stream = async_stream::stream! {
-                yield Err(AiError::Api(
-                    "OpenAI Codex tool use is not implemented in this library yet.".to_string(),
-                ));
-            };
-            return futures_util::StreamExt::boxed(stream);
-        }
         let client = self.client.clone();
         let config = self.config.clone();
         let request = Self::convert_request(request, true);
@@ -1324,6 +1515,7 @@ impl AiClient for OpenAiCodexClient {
 
             let mut stream = response.bytes_stream();
             let mut buffer = String::new();
+            let mut pending_tool_calls: HashMap<usize, PendingToolCallState> = HashMap::new();
 
             while let Some(chunk_result) = stream.next().await {
                 let chunk = match chunk_result {
@@ -1388,6 +1580,162 @@ impl AiClient for OpenAiCodexClient {
                                 thinking_delta: None,
                                 thinking_signature: None,
                                 tool_call_deltas: Vec::new(),
+                                done: false,
+                                debug: if request_debug.is_some() || response_debug.is_some() {
+                                    Some(DebugTrace {
+                                        request: request_debug.take(),
+                                        response: response_debug.clone(),
+                                    })
+                                } else {
+                                    None
+                                },
+                            });
+                        }
+                        "response.output_item.added" => {
+                            let Some(output_index) = event.output_index else {
+                                continue;
+                            };
+                            let Some(item) = event.item else {
+                                continue;
+                            };
+                            if item.item_type != "function_call" {
+                                continue;
+                            }
+
+                            let pending = pending_tool_calls.entry(output_index).or_default();
+                            let id = item.call_id.or(item.id);
+                            let name = item.name;
+                            if let Some(id_value) = &id {
+                                pending.id = Some(id_value.clone());
+                            }
+                            if let Some(name_value) = &name {
+                                pending.name = Some(name_value.clone());
+                            }
+
+                            if id.is_none() && name.is_none() {
+                                continue;
+                            }
+
+                            yield Ok(StreamChunk {
+                                delta: String::new(),
+                                thinking_delta: None,
+                                thinking_signature: None,
+                                tool_call_deltas: vec![ToolCallDelta {
+                                    index: output_index,
+                                    id,
+                                    name,
+                                    arguments: None,
+                                }],
+                                done: false,
+                                debug: if request_debug.is_some() || response_debug.is_some() {
+                                    Some(DebugTrace {
+                                        request: request_debug.take(),
+                                        response: response_debug.clone(),
+                                    })
+                                } else {
+                                    None
+                                },
+                            });
+                        }
+                        "response.function_call_arguments.delta" => {
+                            let Some(output_index) = event.output_index else {
+                                continue;
+                            };
+                            let Some(arguments) = event.delta else {
+                                continue;
+                            };
+
+                            let pending = pending_tool_calls.entry(output_index).or_default();
+                            pending.saw_argument_delta = true;
+                            pending.arguments.push_str(&arguments);
+
+                            yield Ok(StreamChunk {
+                                delta: String::new(),
+                                thinking_delta: None,
+                                thinking_signature: None,
+                                tool_call_deltas: vec![ToolCallDelta {
+                                    index: output_index,
+                                    id: None,
+                                    name: None,
+                                    arguments: Some(arguments),
+                                }],
+                                done: false,
+                                debug: if request_debug.is_some() || response_debug.is_some() {
+                                    Some(DebugTrace {
+                                        request: request_debug.take(),
+                                        response: response_debug.clone(),
+                                    })
+                                } else {
+                                    None
+                                },
+                            });
+                        }
+                        "response.output_item.done" => {
+                            let Some(output_index) = event.output_index else {
+                                continue;
+                            };
+                            let Some(item) = event.item else {
+                                continue;
+                            };
+
+                            if item.item_type == "reasoning" {
+                                if let Some(signature) = item.encrypted_content {
+                                    yield Ok(StreamChunk {
+                                        delta: String::new(),
+                                        thinking_delta: None,
+                                        thinking_signature: Some(signature),
+                                        tool_call_deltas: Vec::new(),
+                                        done: false,
+                                        debug: if request_debug.is_some() || response_debug.is_some() {
+                                            Some(DebugTrace {
+                                                request: request_debug.take(),
+                                                response: response_debug.clone(),
+                                            })
+                                        } else {
+                                            None
+                                        },
+                                    });
+                                }
+                                continue;
+                            }
+
+                            if item.item_type != "function_call" {
+                                continue;
+                            }
+
+                            let pending = pending_tool_calls.entry(output_index).or_default();
+                            let id = item.call_id.or(item.id);
+                            let name = item.name;
+                            let arguments = if pending.saw_argument_delta {
+                                None
+                            } else {
+                                item.arguments
+                            };
+
+                            if let Some(id_value) = &id {
+                                pending.id = Some(id_value.clone());
+                            }
+                            if let Some(name_value) = &name {
+                                pending.name = Some(name_value.clone());
+                            }
+                            if let Some(arguments_value) = &arguments {
+                                pending.arguments = arguments_value.clone();
+                            }
+
+                            if id.is_none() && name.is_none() && arguments.is_none() {
+                                continue;
+                            }
+
+                            yield Ok(StreamChunk {
+                                delta: String::new(),
+                                thinking_delta: None,
+                                thinking_signature: None,
+                                tool_call_deltas: vec![ToolCallDelta {
+                                    index: output_index,
+                                    id,
+                                    name,
+                                    arguments,
+                                }],
                                 done: false,
                                 debug: if request_debug.is_some() || response_debug.is_some() {
                                     Some(DebugTrace {
@@ -1477,8 +1825,14 @@ impl AiClient for OpenAiCodexClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenAiCodexClient, base64_url_decode, extract_account_id_from_tokens};
-    use crate::ai::{ChatRequest, Message, ThinkingConfig, ThinkingEffort};
+    use super::{
+        OpenAiCodexClient, OpenAiCodexInputItem, OpenAiCodexOutputItem, OpenAiCodexResponse,
+        base64_url_decode, extract_account_id_from_tokens,
+    };
+    use crate::ai::{
+        ChatRequest, Message, ThinkingConfig, ThinkingEffort, ToolCall, ToolChoice, ToolDefinition,
+    };
+    use serde_json::json;
 
     #[test]
     fn decodes_base64_url_without_padding() {
@@ -1545,6 +1899,80 @@ mod tests {
             converted.reasoning.and_then(|reasoning| reasoning.effort),
             Some("xhigh")
         );
+    }
+
+    #[test]
+    fn codex_request_includes_tools_and_tool_outputs() {
+        let request = ChatRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![
+                Message::assistant_tool_calls(vec![ToolCall {
+                    id: "call_123".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: json!({"city": "Tokyo"}),
+                }]),
+                Message::tool_result("call_123", "get_weather", json!({"temp_c": 21})),
+            ],
+            tools: vec![ToolDefinition::function(
+                "get_weather",
+                Some("Get weather".to_string()),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }),
+            )],
+            tool_choice: Some(ToolChoice::tool("get_weather")),
+            max_tokens: None,
+            temperature: None,
+            system: None,
+            thinking: None,
+        };
+
+        let converted = OpenAiCodexClient::convert_request(request, true);
+
+        assert_eq!(converted.tools.as_ref().map(Vec::len), Some(1));
+        assert!(matches!(
+            converted.tool_choice,
+            Some(super::OpenAiCodexToolChoice::Function { .. })
+        ));
+        assert!(matches!(
+            converted.input.first(),
+            Some(OpenAiCodexInputItem::FunctionCall(_))
+        ));
+        assert!(matches!(
+            converted.input.get(1),
+            Some(OpenAiCodexInputItem::FunctionCallOutput(_))
+        ));
+    }
+
+    #[test]
+    fn codex_response_parses_tool_calls() {
+        let response = OpenAiCodexResponse {
+            id: "resp_123".to_string(),
+            model: "gpt-5.4".to_string(),
+            usage: None,
+            output: vec![OpenAiCodexOutputItem {
+                item_type: "function_call".to_string(),
+                id: Some("fc_123".to_string()),
+                call_id: Some("call_123".to_string()),
+                name: Some("get_weather".to_string()),
+                arguments: Some(r#"{"city":"Tokyo"}"#.to_string()),
+                status: Some("completed".to_string()),
+                encrypted_content: None,
+                content: Vec::new(),
+                summary: Vec::new(),
+                role: None,
+            }],
+        };
+
+        let converted = OpenAiCodexClient::convert_response(response, None, None);
+        assert_eq!(converted.tool_calls.len(), 1);
+        assert_eq!(converted.tool_calls[0].id, "call_123");
+        assert_eq!(converted.tool_calls[0].name, "get_weather");
+        assert_eq!(converted.tool_calls[0].arguments, json!({"city": "Tokyo"}));
     }
 
     #[test]
