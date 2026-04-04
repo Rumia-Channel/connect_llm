@@ -79,6 +79,7 @@ fn convert_message(message: Message) -> GeminiContent {
     let Message {
         role,
         content,
+        created_at_ms: _,
         thinking,
         tool_calls,
         tool_call_id,

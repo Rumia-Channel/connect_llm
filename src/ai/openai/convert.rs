@@ -293,6 +293,7 @@ pub(super) fn convert_request(request: ChatRequest, base_url: &str, stream: bool
         let Message {
             role,
             content,
+            created_at_ms: _,
             thinking,
             tool_calls,
             tool_call_id,

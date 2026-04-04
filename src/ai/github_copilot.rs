@@ -343,6 +343,7 @@ mod tests {
             messages: vec![Message {
                 role: "assistant".to_string(),
                 content: "done".to_string(),
+                created_at_ms: None,
                 thinking: Some(ThinkingOutput {
                     text: Some("reason".to_string()),
                     signature: Some("opaque".to_string()),

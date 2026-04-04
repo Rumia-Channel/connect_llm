@@ -1,11 +1,32 @@
 # connect_llm
-- Purpose: reusable Rust library crate that exposes LLM client access extracted from `sample/kakou`.
-- Tech stack: Rust 2024 edition; async HTTP clients via `reqwest`; async traits via `async-trait`; stream support via `futures-util` and `async-stream`; JSON via `serde`/`serde_json`.
-- Structure:
-  - `src/lib.rs`: crate root, re-exports public LLM API.
-  - `src/ai/mod.rs`: shared request/response types, provider enum, client trait, client factory.
-  - `src/ai/openai.rs`: OpenAI-compatible client implementation used for OpenAI/Sakura/Kimi/Z AI variants.
-  - `src/ai/anthropic.rs`: Anthropic-compatible client implementation used for Anthropic/Kimi Coding.
-  - `src/main.rs`: placeholder binary entrypoint.
-  - `sample/kakou/`: source project the library was extracted from; not yet rewired automatically in this repo.
-- Platform: Windows development environment with PowerShell.
+- Purpose: Rust 2024 library crate that provides a unified async chat API across multiple LLM providers, with optional sample CLI.
+- Crate/package layout:
+  - `src/lib.rs`: crate root; re-exports public AI API, auth helpers, debug helpers, context manager, and text window helpers.
+  - `src/ai/mod.rs`: shared domain types (`Message`, `ChatRequest`, `ChatResponse`, `ThinkingConfig`, `ToolDefinition`, etc.), `AiClient` trait, `AiProvider` enum, provider factory, debug logging helpers.
+  - `src/ai/providers/`: provider metadata/spec table. Maps each `AiProvider` to default base URL, default model, capability flags, request policy, and API style.
+  - `src/ai/openai.rs`: OpenAI-compatible transport implementation used for OpenAI, Google AI Studio compatibility endpoint, Grok, Sakura, Kimi, ZAi variants depending on provider spec.
+  - `src/ai/anthropic.rs`: Anthropic transport implementation used for Anthropic and Kimi Coding.
+  - `src/ai/gemini.rs`: Gemini native `generateContent` / `streamGenerateContent` implementation.
+  - `src/ai/github_copilot.rs`: Copilot-specific OpenAI-compatible transport plus token exchange flow.
+  - `src/ai/openai_codex.rs`: ChatGPT Codex backend transport plus OAuth token refresh flow.
+  - `src/ai/*/convert.rs`, `protocol.rs`, `streaming.rs`, `auth.rs`: provider-specific request/response conversion, protocol DTOs, stream parsing, and auth helpers.
+  - `src/context/limits.rs`: heuristic model context/output token limits by provider/model.
+  - `src/context/manager.rs`: request token estimation, history compaction, summarization, overflow retry, managed chat/stream entrypoints.
+  - `src/context/text.rs`: splits large text into overlapping character windows.
+  - `src/sample_cli.rs` + `src/sample_cli/*.rs`: optional interactive CLI for provider selection, auth bootstrap, chat/stream execution, debug/thinking toggles, and image persistence.
+  - `src/main.rs`: CLI binary entrypoint behind the `sample-cli` feature.
+- Supported providers currently exposed by `AiProvider`: Anthropic, GitHubCopilot, GoogleAiStudio, Gemini, Grok, OpenAi, OpenAiCodex, Sakura, Kimi, KimiCoding, ZAi, ZAiCoding.
+- Public features/capabilities:
+  - Non-streaming and streaming chat.
+  - Thinking config/output abstraction.
+  - Tool definition / tool call / tool result abstraction.
+  - Generated image collection on providers that return inline image data.
+  - Provider capability inspection and default configuration helpers.
+  - Optional auth bootstrap helpers for OpenAI Codex browser login and GitHub Copilot device login.
+  - Context management with pre-send compaction and retry after context overflow.
+- Dependencies: async via `tokio`, HTTP via `reqwest`, traits via `async-trait`, streams via `futures-util` and `async-stream`, serialization via `serde`/`serde_json`, plus auth helpers (`base64`, `sha2`, `rand`).
+- Cargo features:
+  - default: library only.
+  - `sample-cli`: enables `crossterm` and `tokio` binary at `src/main.rs`.
+- Validation status observed in workspace on 2026-04-04: `cargo check` and `cargo test` pass; unit tests cover provider request/response conversion, request policy handling, auth parsing helpers, provider base URL classification, and context manager compaction behavior.
+- Note: the older memory that described the repo as only OpenAI/Anthropic plus placeholder binary is outdated; the current codebase is broader and includes native Gemini, GitHub Copilot, OpenAI Codex, context manager, and sample CLI.

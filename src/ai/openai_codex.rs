@@ -270,6 +270,7 @@ mod tests {
             messages: vec![Message {
                 role: "user".to_string(),
                 content: "hello".to_string(),
+                created_at_ms: None,
                 thinking: None,
                 tool_calls: Vec::new(),
                 tool_call_id: None,
@@ -300,6 +301,7 @@ mod tests {
             messages: vec![Message {
                 role: "user".to_string(),
                 content: "hello".to_string(),
+                created_at_ms: None,
                 thinking: None,
                 tool_calls: Vec::new(),
                 tool_call_id: None,

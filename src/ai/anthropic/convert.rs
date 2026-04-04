@@ -50,6 +50,7 @@ pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessa
     let Message {
         role,
         content,
+        created_at_ms: _,
         thinking,
         tool_calls,
         tool_call_id,

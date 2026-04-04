@@ -130,6 +130,7 @@ pub(super) fn convert_request(request: ChatRequest, stream: bool) -> GitHubCopil
         let Message {
             role,
             content,
+            created_at_ms: _,
             thinking,
             tool_calls,
             tool_call_id,

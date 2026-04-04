@@ -15,6 +15,34 @@ use self::settings::{
 use self::streaming::send_request;
 use connect_llm::{AiConfig, ChatRequest, ContextManager, Message, set_debug_logging};
 
+fn describe_compaction(compaction: &connect_llm::ContextCompaction) -> String {
+    if compaction.microcompacted_messages > 0 && compaction.summarized_messages > 0 {
+        format!(
+            "microcompacted {} messages in {} passes and summarized {} earlier messages ({} -> {} estimated tokens)",
+            compaction.microcompacted_messages,
+            compaction.microcompaction_passes,
+            compaction.summarized_messages,
+            compaction.estimated_tokens_before,
+            compaction.estimated_tokens_after
+        )
+    } else if compaction.microcompacted_messages > 0 {
+        format!(
+            "microcompacted {} messages in {} passes ({} -> {} estimated tokens)",
+            compaction.microcompacted_messages,
+            compaction.microcompaction_passes,
+            compaction.estimated_tokens_before,
+            compaction.estimated_tokens_after
+        )
+    } else {
+        format!(
+            "compacted {} earlier messages ({} -> {} estimated tokens)",
+            compaction.summarized_messages,
+            compaction.estimated_tokens_before,
+            compaction.estimated_tokens_after
+        )
+    }
+}
+
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("connect_llm sample chat");
     println!("API key is only kept in this process memory.");
@@ -188,12 +216,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         if use_stream {
             if let Some(compaction) = &prepared.compaction {
-                println!(
-                    "context manager> compacted {} earlier messages ({} -> {} estimated tokens)",
-                    compaction.summarized_messages,
-                    compaction.estimated_tokens_before,
-                    compaction.estimated_tokens_after
-                );
+                println!("context manager> {}", describe_compaction(compaction));
             }
         }
         let prepared_request = prepared.request;
@@ -221,12 +244,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     print_tool_calls(&response.tool_calls);
                     if let Some(compaction) = &compaction {
-                        println!(
-                            "context manager> compacted {} earlier messages ({} -> {} estimated tokens)",
-                            compaction.summarized_messages,
-                            compaction.estimated_tokens_before,
-                            compaction.estimated_tokens_after
-                        );
+                        println!("context manager> {}", describe_compaction(compaction));
                     }
                     println!();
                 }
@@ -239,20 +257,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                messages.push(Message {
-                    role: "assistant".to_string(),
-                    content: response.content,
-                    thinking: if thinking_enabled {
-                        response.thinking
-                    } else {
-                        None
-                    },
-                    tool_calls: response.tool_calls,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_result: None,
-                    tool_error: None,
-                });
+                let mut assistant_message = Message::assistant(response.content);
+                assistant_message.thinking = if thinking_enabled {
+                    response.thinking
+                } else {
+                    None
+                };
+                assistant_message.tool_calls = response.tool_calls;
+                messages.push(assistant_message);
             }
             Err(error) => println!("assistant error> {}", error),
         }

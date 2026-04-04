@@ -91,13 +91,16 @@ println!("{}", managed.response.content);
 
 if let Some(compaction) = managed.compaction {
     println!(
-        "compacted {} messages ({} -> {} est tokens)",
+        "compacted {} messages after {} microcompact passes ({} -> {} est tokens)",
         compaction.summarized_messages,
+        compaction.microcompaction_passes,
         compaction.estimated_tokens_before,
         compaction.estimated_tokens_after,
     );
 }
 ```
+
+時間ベースの圧縮を効かせたい場合、`Message::user()` / `Message::assistant()` などの constructor を使うか、手動生成時に `created_at_ms` を保持してください。長い休止の前を古いセッションとしてまとめたり、十分に古い長文を excerpt 化したりする判定に使われます。
 
 streaming では先に `prepare_request()` してから `chat_stream()` へ渡します。
 

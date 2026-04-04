@@ -20,9 +20,12 @@ pub use openai_codex::{
 use providers::{ApiStyle, ProviderSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
@@ -66,6 +69,8 @@ pub(crate) fn capture_debug_text(label: &str, body: impl Into<String>) -> Option
 pub struct Message {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -81,10 +86,23 @@ pub struct Message {
 }
 
 impl Message {
+    fn now_timestamp_ms() -> Option<u64> {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+    }
+
+    pub fn with_created_at_ms(mut self, created_at_ms: u64) -> Self {
+        self.created_at_ms = Some(created_at_ms);
+        self
+    }
+
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".to_string(),
             content: content.into(),
+            created_at_ms: Self::now_timestamp_ms(),
             thinking: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -98,6 +116,7 @@ impl Message {
         Self {
             role: "assistant".to_string(),
             content: content.into(),
+            created_at_ms: Self::now_timestamp_ms(),
             thinking: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -111,6 +130,7 @@ impl Message {
         Self {
             role: "assistant".to_string(),
             content: String::new(),
+            created_at_ms: Self::now_timestamp_ms(),
             thinking: None,
             tool_calls,
             tool_call_id: None,
@@ -128,6 +148,7 @@ impl Message {
         Self {
             role: "tool".to_string(),
             content: String::new(),
+            created_at_ms: Self::now_timestamp_ms(),
             thinking: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
