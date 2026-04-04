@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod context;
+pub mod mcp;
 
 pub use ai::{
     AiClient, AiConfig, AiError, AiProvider, ChatRequest, ChatResponse, DebugTrace, GeneratedImage,
@@ -13,4 +14,8 @@ pub use context::{
     ContextCompaction, ContextManager, ContextManagerConfig, ManagedChatResponse,
     ModelContextLimits, PreparedChatRequest, TextWindow, TextWindowConfig,
     resolve_model_context_limits, split_text_into_windows,
+};
+pub use mcp::{
+    McpBridge, McpConfig, McpManagedChatResponse, McpServerConfig, McpToolExecution,
+    McpToolLoopConfig,
 };

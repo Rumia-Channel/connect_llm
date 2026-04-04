@@ -26,6 +26,7 @@ connect_llm = { git = "https://github.com/Rumia-Channel/connect_llm.git" }
 - Thinking の取得
 - provider に応じた Thinking 設定の送信
 - Tool Use の定義送信と tool call / tool result の送受信
+- caller が渡した `mcp.json` を bridge して MCP tools を全 provider へ共通 tool として公開
 - Gemini native で返ってきた画像出力の受信
 
 ## 公開 API
@@ -53,6 +54,11 @@ connect_llm = { git = "https://github.com/Rumia-Channel/connect_llm.git" }
 - `ToolChoice`
 - `ToolCall`
 - `ToolCallDelta`
+- `McpConfig`
+- `McpBridge`
+- `McpManagedChatResponse`
+- `McpToolExecution`
+- `McpToolLoopConfig`
 - `TextWindow`
 - `TextWindowConfig`
 
@@ -116,6 +122,41 @@ use connect_llm::{TextWindowConfig, split_text_into_windows};
 
 let windows = split_text_into_windows(&very_large_text, TextWindowConfig::default());
 ```
+
+## MCP bridge
+
+呼び出し側が `mcp.json` を持っているなら、このライブラリが MCP server へ接続し、取得した tools を通常の `ToolDefinition` として各 provider に見せられます。モデルが返した tool call はこのライブラリが MCP server に実行し、`tool_result` を積んで自動で再送します。
+
+```rust
+use connect_llm::{
+    AiConfig, AiProvider, ChatRequest, ContextManager, McpBridge, McpConfig, Message,
+};
+
+let provider = AiProvider::Anthropic;
+let client = provider.create_client(AiConfig {
+    api_key: std::env::var("API_KEY")?,
+    base_url: provider.default_base_url().to_string(),
+    model: provider.default_model().to_string(),
+});
+
+let mcp = McpConfig::from_json_str(&std::fs::read_to_string(".mcp.json")?)?;
+let bridge = McpBridge::new(mcp);
+let manager = ContextManager::default();
+
+let request = ChatRequest::new(
+    client.config().model.clone(),
+    vec![Message::user("workspace を調べて TODO を探して")],
+);
+
+let managed = bridge
+    .chat_with_context_manager(&manager, client.as_ref(), request)
+    .await?;
+
+println!("{}", managed.response.content);
+println!("executed {} MCP tools", managed.tool_executions.len());
+```
+
+現状の bridge は MCP tools を対象にしています。`mcp.json` の common な `command` / `args` / `env` / `cwd` と `url` / `headers` を解釈し、stdio と Streamable HTTP の両方に対応します。
 
 ## デバッグ
 
