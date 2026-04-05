@@ -56,6 +56,10 @@ connect_llm = { git = "https://github.com/Rumia-Channel/connect_llm.git" }
 - `ToolCallDelta`
 - `McpConfig`
 - `McpBridge`
+- `McpRuntime`
+- `McpRuntimeStatus`
+- `McpConfiguredServerStatus`
+- `McpExportedToolStatus`
 - `McpManagedChatResponse`
 - `McpToolExecution`
 - `McpToolLoopConfig`
@@ -156,7 +160,13 @@ println!("{}", managed.response.content);
 println!("executed {} MCP tools", managed.tool_executions.len());
 ```
 
-現状の bridge は MCP tools を対象にしています。`mcp.json` の common な `command` / `args` / `env` / `cwd` と `url` / `headers` を解釈し、stdio と Streamable HTTP の両方に対応します。
+現状の bridge は MCP tools を対象にしています。`mcp.json` の common な `command` / `args` / `env` / `cwd` と `url` / `headers` を解釈し、stdio と Streamable HTTP の両方に対応します。`chat()` / `chat_with_context_manager()` に加えて、`chat_stream()` / `chat_stream_with_context_manager()` で streaming の tool loop も扱えます。
+
+長時間動くアプリでは、毎回 connect/close する `McpBridge` より、接続を保持する `McpRuntime` を使うほうが適しています。sample CLI もこちらを使うので、`/mcp off` かプロセス終了まで MCP server は起動したままです。
+
+`McpBridge::status()` で設定済み server の一覧、`McpRuntime::status()` で現在の接続状態と公開中 tool alias の一覧を取得できます。sample CLI では `/mcp-status` と `/mcp-tools` で確認できます。
+
+sample CLI で手元の Serena を試すだけなら、この repo には [sample/mcp.json](/C:/Users/rumia/Desktop/APP/Rust/conect_llm/sample/mcp.json) も入っています。起動時の `mcp.json` プロンプトか `/mcp sample/mcp.json` で読み込めます。`cwd` は設定ファイル基準で解決するので、この sample では repo root を見るように `..` を指定しています。
 
 ## デバッグ
 

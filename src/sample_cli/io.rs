@@ -1,5 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use connect_llm::{DebugTrace, GeneratedImage, ThinkingOutput, ToolCall};
+use connect_llm::{
+    DebugTrace, GeneratedImage, McpExportedToolStatus, McpRuntimeStatus, McpToolExecution,
+    ThinkingOutput, ToolCall,
+};
 use crossterm::{
     cursor::{MoveToColumn, MoveUp},
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -36,8 +39,51 @@ pub(crate) fn print_tool_calls(tool_calls: &[ToolCall]) {
     }
 
     for tool_call in tool_calls {
-        println!("tool call> {} {}", tool_call.name, tool_call.arguments);
+        println!("tools> {} {}", tool_call.name, tool_call.arguments);
     }
+}
+
+pub(crate) fn print_mcp_tool_executions(tool_executions: &[McpToolExecution]) {
+    if tool_executions.is_empty() {
+        return;
+    }
+
+    for execution in tool_executions {
+        let status = if execution.is_error { " error" } else { "" };
+        println!(
+            "tools> {} {} [{} -> {}.{}{}]",
+            execution.tool_name,
+            execution.arguments,
+            execution.tool_call_id,
+            execution.server_label,
+            execution.remote_tool_name,
+            status
+        );
+        println!(
+            "tool result> {}",
+            summarize_json_value(&execution.result, 320)
+        );
+    }
+}
+
+fn summarize_json_value(value: &serde_json::Value, max_chars: usize) -> String {
+    let raw = match value {
+        serde_json::Value::String(text) => text.clone(),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+    };
+    truncate_for_display(&raw, max_chars)
+}
+
+fn truncate_for_display(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+
+    let mut truncated = text.chars().take(max_chars).collect::<String>();
+    truncated.push_str("...");
+    truncated.push_str(&format!(" ({} chars)", total));
+    truncated
 }
 
 pub(crate) fn print_debug_trace(debug: Option<&DebugTrace>) {
@@ -50,6 +96,47 @@ pub(crate) fn print_debug_trace(debug: Option<&DebugTrace>) {
     }
     if let Some(response) = &debug.response {
         eprintln!("{}", response.trim_end());
+    }
+}
+
+pub(crate) fn print_mcp_status(status: &McpRuntimeStatus) {
+    println!(
+        "mcp> connected={} configured_servers={} connected_servers={}",
+        status.connected, status.configured_server_count, status.connected_server_count
+    );
+    for server in &status.configured_servers {
+        let target = server
+            .command
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| server.url.clone())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "mcp server> {} enabled={} connected={} transport={} tools={} target={}",
+            server.label,
+            server.enabled,
+            server.connected,
+            server.transport,
+            server.exported_tool_count,
+            target
+        );
+        if let Some(error) = &server.last_error {
+            println!("mcp error> {} {}", server.label, error);
+        }
+    }
+}
+
+pub(crate) fn print_mcp_tools(tools: &[McpExportedToolStatus]) {
+    if tools.is_empty() {
+        println!("mcp tools> none");
+        return;
+    }
+
+    for tool in tools {
+        println!(
+            "mcp tool> {} -> {}.{}",
+            tool.alias, tool.server_label, tool.remote_tool_name
+        );
     }
 }
 

@@ -1,5 +1,6 @@
 use connect_llm::{
-    ChatRequest, ChatResponse, DebugTrace, GeneratedImage, ThinkingOutput, ToolCall, Usage,
+    ChatRequest, ChatResponse, DebugTrace, GeneratedImage, McpManagedChatResponse, McpRuntime,
+    McpStreamEvent, ThinkingOutput, ToolCall, Usage,
 };
 use futures_util::StreamExt;
 use std::{
@@ -23,139 +24,247 @@ pub(crate) async fn send_request(
 
     let model = request.model.clone();
     let mut stream = client.chat_stream(request);
-    let mut content = String::new();
-    let mut thinking_text = String::new();
-    let mut thinking_signature: Option<String> = None;
-    let mut tool_calls: Vec<(Option<String>, Option<String>, String)> = Vec::new();
-    let mut images: Vec<GeneratedImage> = Vec::new();
-    let mut seen_image_keys: HashSet<String> = HashSet::new();
-    let mut printed_assistant_prefix = false;
-    let mut printed_thinking_prefix = false;
-    let mut debug_request: Option<String> = None;
-    let mut debug_responses: Vec<String> = Vec::new();
+    let mut state = PrintedStreamState::default();
+    let mut response_builder = StreamResponseBuilder::new(model.clone());
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-
-        if let Some(debug) = chunk.debug {
-            if debug_request.is_none() {
-                debug_request = debug.request;
-            }
-            if let Some(response) = debug.response {
-                debug_responses.push(response);
-            }
-        }
-
-        for tool_call_delta in chunk.tool_call_deltas {
-            while tool_calls.len() <= tool_call_delta.index {
-                tool_calls.push((None, None, String::new()));
-            }
-
-            if let Some(entry) = tool_calls.get_mut(tool_call_delta.index) {
-                if let Some(id) = tool_call_delta.id {
-                    entry.0 = Some(id);
-                }
-                if let Some(name) = tool_call_delta.name {
-                    entry.1 = Some(name);
-                }
-                if let Some(arguments) = tool_call_delta.arguments {
-                    entry.2.push_str(&arguments);
-                }
-            }
-        }
-
-        for image in chunk.images {
-            let key = image.dedup_key();
-            if seen_image_keys.insert(key) {
-                images.push(image);
-            }
-        }
-
-        if !chunk.delta.is_empty() {
-            if !printed_assistant_prefix {
-                print!("\nassistant> ");
-                printed_assistant_prefix = true;
-            }
-            print!("{}", chunk.delta);
-            io::stdout()
-                .flush()
-                .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
-            content.push_str(&chunk.delta);
-        }
-
-        if include_thinking {
-            if let Some(thinking_delta) = chunk.thinking_delta {
-                if !printed_thinking_prefix {
-                    print!("\nthinking> ");
-                    printed_thinking_prefix = true;
-                }
-                print!("{}", thinking_delta);
-                io::stdout()
-                    .flush()
-                    .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
-                thinking_text.push_str(&thinking_delta);
-            }
-            if let Some(signature) = chunk.thinking_signature {
-                thinking_signature = Some(signature);
-            }
-        }
+        print_stream_chunk(&chunk, include_thinking, &mut state)?;
+        response_builder.ingest(&chunk);
 
         if chunk.done {
             break;
         }
     }
 
-    if printed_assistant_prefix || printed_thinking_prefix {
-        println!();
+    finish_stream_output(&state);
+    Ok(response_builder.finish(include_thinking))
+}
+
+pub(crate) async fn send_mcp_request(
+    runtime: &mut McpRuntime,
+    context_manager: &connect_llm::ContextManager,
+    client: &dyn connect_llm::AiClient,
+    request: ChatRequest,
+    include_thinking: bool,
+) -> Result<McpManagedChatResponse, connect_llm::AiError> {
+    let mut stream = runtime.chat_stream_with_context_manager(context_manager, client, request);
+    let mut state = PrintedStreamState::default();
+    let mut finished = None;
+
+    while let Some(event) = stream.next().await {
+        match event? {
+            McpStreamEvent::Chunk(chunk) => {
+                print_stream_chunk(&chunk, include_thinking, &mut state)?;
+            }
+            McpStreamEvent::Finished(managed) => {
+                print_mcp_finished_fallback(&managed, include_thinking, &mut state)?;
+                finished = Some(managed);
+                break;
+            }
+        }
     }
 
-    Ok(ChatResponse {
-        id: "stream".to_string(),
-        content,
-        model,
-        usage: Usage {
-            input_tokens: 0,
-            output_tokens: 0,
-        },
-        thinking: if include_thinking && !thinking_text.is_empty() {
-            Some(ThinkingOutput {
-                text: Some(thinking_text),
-                signature: thinking_signature,
-                redacted: None,
-            })
-        } else if include_thinking && thinking_signature.is_some() {
-            Some(ThinkingOutput {
-                text: None,
-                signature: thinking_signature,
-                redacted: None,
-            })
-        } else {
-            None
-        },
-        images,
-        tool_calls: tool_calls
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, (id, name, arguments))| {
-                name.map(|name| ToolCall {
-                    id: id.unwrap_or_else(|| format!("tool-call-{}", index)),
-                    name,
-                    arguments: serde_json::from_str(&arguments)
-                        .unwrap_or_else(|_| serde_json::Value::String(arguments)),
-                })
-            })
-            .collect(),
-        debug: if debug_request.is_some() || !debug_responses.is_empty() {
-            Some(DebugTrace {
-                request: debug_request,
-                response: if debug_responses.is_empty() {
-                    None
-                } else {
-                    Some(debug_responses.join("\n"))
-                },
-            })
-        } else {
-            None
-        },
+    finish_stream_output(&state);
+    finished.ok_or_else(|| {
+        connect_llm::AiError::Api("MCP stream terminated without a final response".to_string())
     })
+}
+
+#[derive(Default)]
+struct PrintedStreamState {
+    printed_assistant_prefix: bool,
+    printed_thinking_prefix: bool,
+}
+
+fn print_stream_chunk(
+    chunk: &connect_llm::StreamChunk,
+    include_thinking: bool,
+    state: &mut PrintedStreamState,
+) -> Result<(), connect_llm::AiError> {
+    if !chunk.delta.is_empty() {
+        if !state.printed_assistant_prefix {
+            print!("\nassistant> ");
+            state.printed_assistant_prefix = true;
+        }
+        print!("{}", chunk.delta);
+        io::stdout()
+            .flush()
+            .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+    }
+
+    if include_thinking {
+        if let Some(thinking_delta) = &chunk.thinking_delta {
+            if !state.printed_thinking_prefix {
+                print!("\nthinking> ");
+                state.printed_thinking_prefix = true;
+            }
+            print!("{}", thinking_delta);
+            io::stdout()
+                .flush()
+                .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn finish_stream_output(state: &PrintedStreamState) {
+    if state.printed_assistant_prefix || state.printed_thinking_prefix {
+        println!();
+    }
+}
+
+fn print_mcp_finished_fallback(
+    managed: &McpManagedChatResponse,
+    include_thinking: bool,
+    state: &mut PrintedStreamState,
+) -> Result<(), connect_llm::AiError> {
+    if !state.printed_assistant_prefix && !managed.response.content.is_empty() {
+        print!("\nassistant> {}", managed.response.content);
+        state.printed_assistant_prefix = true;
+        io::stdout()
+            .flush()
+            .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+    }
+
+    if include_thinking
+        && !state.printed_thinking_prefix
+        && let Some(thinking) = &managed.response.thinking
+        && let Some(text) = &thinking.text
+        && !text.is_empty()
+    {
+        print!("\nthinking> {}", text);
+        state.printed_thinking_prefix = true;
+        io::stdout()
+            .flush()
+            .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+    }
+
+    Ok(())
+}
+
+struct StreamResponseBuilder {
+    model: String,
+    content: String,
+    thinking_text: String,
+    thinking_signature: Option<String>,
+    tool_calls: Vec<(Option<String>, Option<String>, String)>,
+    images: Vec<GeneratedImage>,
+    seen_image_keys: HashSet<String>,
+    debug_request: Option<String>,
+    debug_responses: Vec<String>,
+}
+
+impl StreamResponseBuilder {
+    fn new(model: String) -> Self {
+        Self {
+            model,
+            content: String::new(),
+            thinking_text: String::new(),
+            thinking_signature: None,
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            seen_image_keys: HashSet::new(),
+            debug_request: None,
+            debug_responses: Vec::new(),
+        }
+    }
+
+    fn ingest(&mut self, chunk: &connect_llm::StreamChunk) {
+        if let Some(debug) = &chunk.debug {
+            if self.debug_request.is_none() {
+                self.debug_request = debug.request.clone();
+            }
+            if let Some(response) = &debug.response {
+                self.debug_responses.push(response.clone());
+            }
+        }
+
+        for tool_call_delta in &chunk.tool_call_deltas {
+            while self.tool_calls.len() <= tool_call_delta.index {
+                self.tool_calls.push((None, None, String::new()));
+            }
+
+            if let Some(entry) = self.tool_calls.get_mut(tool_call_delta.index) {
+                if let Some(id) = &tool_call_delta.id {
+                    entry.0 = Some(id.clone());
+                }
+                if let Some(name) = &tool_call_delta.name {
+                    entry.1 = Some(name.clone());
+                }
+                if let Some(arguments) = &tool_call_delta.arguments {
+                    entry.2.push_str(arguments);
+                }
+            }
+        }
+
+        for image in &chunk.images {
+            let key = image.dedup_key();
+            if self.seen_image_keys.insert(key) {
+                self.images.push(image.clone());
+            }
+        }
+
+        self.content.push_str(&chunk.delta);
+        if let Some(thinking_delta) = &chunk.thinking_delta {
+            self.thinking_text.push_str(thinking_delta);
+        }
+        if let Some(signature) = &chunk.thinking_signature {
+            self.thinking_signature = Some(signature.clone());
+        }
+    }
+
+    fn finish(self, include_thinking: bool) -> ChatResponse {
+        ChatResponse {
+            id: "stream".to_string(),
+            content: self.content,
+            model: self.model,
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+            thinking: if include_thinking && !self.thinking_text.is_empty() {
+                Some(ThinkingOutput {
+                    text: Some(self.thinking_text),
+                    signature: self.thinking_signature,
+                    redacted: None,
+                })
+            } else if include_thinking && self.thinking_signature.is_some() {
+                Some(ThinkingOutput {
+                    text: None,
+                    signature: self.thinking_signature,
+                    redacted: None,
+                })
+            } else {
+                None
+            },
+            images: self.images,
+            tool_calls: self
+                .tool_calls
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, (id, name, arguments))| {
+                    name.map(|name| ToolCall {
+                        id: id.unwrap_or_else(|| format!("tool-call-{}", index)),
+                        name,
+                        arguments: serde_json::from_str(&arguments)
+                            .unwrap_or_else(|_| serde_json::Value::String(arguments)),
+                    })
+                })
+                .collect(),
+            debug: if self.debug_request.is_some() || !self.debug_responses.is_empty() {
+                Some(DebugTrace {
+                    request: self.debug_request,
+                    response: if self.debug_responses.is_empty() {
+                        None
+                    } else {
+                        Some(self.debug_responses.join("\n"))
+                    },
+                })
+            } else {
+                None
+            },
+        }
+    }
 }

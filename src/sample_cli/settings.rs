@@ -1,9 +1,10 @@
 use crate::sample_cli::io::{prompt, prompt_default};
 use connect_llm::{
-    AiConfig, AiProvider, Message, ThinkingConfig, ThinkingEffort, github_copilot_auth_path,
-    login_github_copilot_via_device, login_openai_codex_via_browser, openai_codex_auth_path,
+    AiConfig, AiProvider, McpBridge, McpConfig, McpRuntime, Message, ThinkingConfig,
+    ThinkingEffort, github_copilot_auth_path, login_github_copilot_via_device,
+    login_openai_codex_via_browser, openai_codex_auth_path,
 };
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 pub(crate) const PROVIDERS: [AiProvider; 12] = [
     AiProvider::Sakura,
@@ -189,6 +190,15 @@ pub(crate) fn select_debug_mode() -> Result<bool, Box<dyn std::error::Error>> {
     parse_debug_mode(&input).map_err(|error| error.into())
 }
 
+pub(crate) fn select_mcp_path() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let input = prompt_default(
+        "mcp.json",
+        "",
+        "Optional path to an mcp.json file. Leave empty to disable MCP.",
+    )?;
+    normalize_mcp_path(&input).map_err(|error| error.into())
+}
+
 pub(crate) fn parse_thinking_toggle(value: &str) -> Result<bool, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "" | "on" | "true" | "yes" | "1" => Ok(true),
@@ -220,6 +230,53 @@ pub(crate) fn parse_stream_mode(value: &str) -> Result<bool, String> {
 
 pub(crate) fn parse_debug_mode(value: &str) -> Result<bool, String> {
     parse_stream_mode(value)
+}
+
+pub(crate) fn normalize_mcp_path(value: &str) -> Result<Option<String>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("off") || trimmed == "-" {
+        return Ok(None);
+    }
+
+    let mut normalized = trimmed;
+    loop {
+        let unquoted = normalized
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .or_else(|| {
+                normalized
+                    .strip_prefix('\'')
+                    .and_then(|value| value.strip_suffix('\''))
+            });
+        let Some(next) = unquoted else {
+            break;
+        };
+        normalized = next.trim();
+    }
+
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    let path = Path::new(normalized);
+    let normalized_path = if path.is_dir() {
+        path.join("mcp.json").to_string_lossy().into_owned()
+    } else {
+        normalized.to_string()
+    };
+
+    Ok(Some(normalized_path))
+}
+
+pub(crate) async fn load_mcp_runtime_from_path(
+    path: Option<&str>,
+) -> Result<Option<(String, McpRuntime)>, Box<dyn std::error::Error>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let config = McpConfig::from_path(path)?;
+    let runtime = McpBridge::new(config).connect().await?;
+    Ok(Some((path.to_string(), runtime)))
 }
 
 pub(crate) fn describe_codex_effort(effort: Option<ThinkingEffort>) -> String {

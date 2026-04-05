@@ -3,16 +3,17 @@ mod settings;
 mod streaming;
 
 use self::io::{
-    persist_generated_images, print_debug_trace, print_thinking, print_tool_calls, prompt,
-    prompt_default, prompt_multiline,
+    persist_generated_images, print_debug_trace, print_mcp_status, print_mcp_tool_executions,
+    print_mcp_tools, print_thinking, print_tool_calls, prompt, prompt_default, prompt_multiline,
 };
 use self::settings::{
-    build_thinking_config, describe_codex_effort, ensure_provider_auth_ready, parse_codex_effort,
-    parse_debug_mode, parse_stream_mode, parse_thinking_toggle, sanitize_messages_for_request,
-    select_codex_effort, select_debug_mode, select_model, select_provider, select_stream_mode,
+    build_thinking_config, describe_codex_effort, ensure_provider_auth_ready,
+    load_mcp_runtime_from_path, normalize_mcp_path, parse_codex_effort, parse_debug_mode,
+    parse_stream_mode, parse_thinking_toggle, sanitize_messages_for_request, select_codex_effort,
+    select_debug_mode, select_mcp_path, select_model, select_provider, select_stream_mode,
     select_thinking_enabled, temp_client,
 };
-use self::streaming::send_request;
+use self::streaming::{send_mcp_request, send_request};
 use connect_llm::{AiConfig, ChatRequest, ContextManager, Message, set_debug_logging};
 
 fn describe_compaction(compaction: &connect_llm::ContextCompaction) -> String {
@@ -74,6 +75,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut use_stream = select_stream_mode()?;
     let mut debug_enabled = select_debug_mode()?;
     set_debug_logging(debug_enabled);
+    let mut mcp = load_mcp_runtime_from_path(select_mcp_path()?.as_deref()).await?;
     let client = provider.create_client(AiConfig {
         api_key,
         base_url,
@@ -83,7 +85,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!(
-        "Commands: /help, /reset, /model <id>, /thinking <on|off>, /codex-effort <default|minimal|low|medium|high|xhigh>, /stream <on|off>, /debug <on|off>, /exit"
+        "Commands: /help, /reset, /model <id>, /thinking <on|off>, /codex-effort <default|minimal|low|medium|high|xhigh>, /stream <on|off>, /debug <on|off>, /mcp <path|off>, /mcp-status, /mcp-tools, /exit"
     );
     println!("Provider: {}", provider.name());
     println!("Model: {}", model);
@@ -94,6 +96,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("Codex effort: {}", describe_codex_effort(codex_effort));
     println!("Stream: {}", if use_stream { "on" } else { "off" });
     println!("Debug: {}", if debug_enabled { "on" } else { "off" });
+    println!(
+        "MCP: {}",
+        mcp.as_ref().map(|(path, _)| path.as_str()).unwrap_or("off")
+    );
+    if let Some((_, runtime)) = &mcp {
+        for server in runtime
+            .status()
+            .configured_servers
+            .into_iter()
+            .filter_map(|server| server.last_error.map(|error| (server.label, error)))
+        {
+            println!("mcp warning> {} {}", server.0, server.1);
+        }
+    }
     println!();
 
     let mut messages: Vec<Message> = Vec::new();
@@ -118,6 +134,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("  /codex-effort <default|minimal|low|medium|high|xhigh>");
             println!("  /stream <on|off>");
             println!("  /debug <on|off>");
+            println!("  /mcp <path|off>");
+            println!("  /mcp-status");
+            println!("  /mcp-tools");
             println!("  /exit");
             continue;
         }
@@ -190,8 +209,73 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "debug mode set to {}",
                         if debug_enabled { "on" } else { "off" }
                     );
+                    if let Some(current_path) = mcp.as_ref().map(|(path, _)| path.clone()) {
+                        if let Some((_, runtime)) = &mut mcp {
+                            runtime.close().await;
+                        }
+                        match load_mcp_runtime_from_path(Some(&current_path)).await {
+                            Ok(next_runtime) => {
+                                mcp = next_runtime;
+                                println!("MCP reconnected with updated debug mode");
+                            }
+                            Err(error) => {
+                                mcp = None;
+                                println!("MCP reconnect failed: {}", error);
+                            }
+                        }
+                    }
                 }
                 Err(error) => println!("invalid debug mode: {}", error),
+            }
+            continue;
+        }
+
+        if let Some(path) = trimmed.strip_prefix("/mcp ") {
+            match normalize_mcp_path(path.trim()) {
+                Ok(next_path) => match load_mcp_runtime_from_path(next_path.as_deref()).await {
+                    Ok(next) => {
+                        if let Some((_, runtime)) = &mut mcp {
+                            runtime.close().await;
+                        }
+                        mcp = next;
+                        println!(
+                            "MCP set to {}",
+                            mcp.as_ref().map(|(path, _)| path.as_str()).unwrap_or("off")
+                        );
+                        if let Some((_, runtime)) = &mcp {
+                            for server in
+                                runtime.status().configured_servers.into_iter().filter_map(
+                                    |server| server.last_error.map(|error| (server.label, error)),
+                                )
+                            {
+                                println!("mcp warning> {} {}", server.0, server.1);
+                            }
+                        }
+                    }
+                    Err(error) => println!("invalid mcp config: {}", error),
+                },
+                Err(error) => println!("invalid mcp path: {}", error),
+            }
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("/mcp-status") {
+            if let Some((path, runtime)) = &mcp {
+                println!("mcp path> {}", path);
+                print_mcp_status(&runtime.status());
+            } else {
+                println!("mcp> off");
+            }
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("/mcp-tools") {
+            if let Some((path, runtime)) = &mcp {
+                let status = runtime.status();
+                println!("mcp path> {}", path);
+                print_mcp_tools(&status.exported_tools);
+            } else {
+                println!("mcp tools> mcp is off");
             }
             continue;
         }
@@ -211,28 +295,61 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             thinking: build_thinking_config(provider, thinking_enabled, codex_effort),
         };
 
-        let prepared = context_manager
-            .prepare_request(client.as_ref(), request)
-            .await?;
-        if use_stream {
-            if let Some(compaction) = &prepared.compaction {
-                println!("context manager> {}", describe_compaction(compaction));
+        match if let Some((_, runtime)) = &mut mcp {
+            if use_stream {
+                send_mcp_request(
+                    runtime,
+                    &context_manager,
+                    client.as_ref(),
+                    request,
+                    thinking_enabled,
+                )
+                .await
+                .map(|managed| {
+                    (
+                        managed.response,
+                        managed.compaction,
+                        Some(managed.messages),
+                        Some(managed.tool_executions),
+                    )
+                })
+            } else {
+                runtime
+                    .chat_with_context_manager(&context_manager, client.as_ref(), request)
+                    .await
+                    .map(|managed| {
+                        (
+                            managed.response,
+                            managed.compaction,
+                            Some(managed.messages),
+                            Some(managed.tool_executions),
+                        )
+                    })
             }
-        }
-        let prepared_request = prepared.request;
-        let prepared_compaction = prepared.compaction.clone();
-
-        match if use_stream {
-            send_request(client.as_ref(), prepared_request, true, thinking_enabled)
-                .await
-                .map(|response| (response, prepared_compaction))
         } else {
-            context_manager
-                .chat(client.as_ref(), prepared_request)
-                .await
-                .map(|managed| (managed.response, managed.compaction))
+            let prepared = context_manager
+                .prepare_request(client.as_ref(), request)
+                .await?;
+            if use_stream {
+                if let Some(compaction) = &prepared.compaction {
+                    println!("context manager> {}", describe_compaction(compaction));
+                }
+            }
+            let prepared_request = prepared.request;
+            let prepared_compaction = prepared.compaction.clone();
+
+            if use_stream {
+                send_request(client.as_ref(), prepared_request, true, thinking_enabled)
+                    .await
+                    .map(|response| (response, prepared_compaction, None, None))
+            } else {
+                context_manager
+                    .chat(client.as_ref(), prepared_request)
+                    .await
+                    .map(|managed| (managed.response, managed.compaction, None, None))
+            }
         } {
-            Ok((response, compaction)) => {
+            Ok((response, compaction, updated_messages, tool_executions)) => {
                 println!();
                 if !use_stream {
                     println!("assistant> {}", response.content.trim_end());
@@ -243,6 +360,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         println!("image output error> {}", error);
                     }
                     print_tool_calls(&response.tool_calls);
+                    if let Some(tool_executions) = &tool_executions {
+                        print_mcp_tool_executions(tool_executions);
+                    }
                     if let Some(compaction) = &compaction {
                         println!("context manager> {}", describe_compaction(compaction));
                     }
@@ -255,19 +375,34 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if let Err(error) = persist_generated_images(&response.images) {
                         println!("image output error> {}", error);
                     }
+                    print_tool_calls(&response.tool_calls);
+                    if let Some(tool_executions) = &tool_executions {
+                        print_mcp_tool_executions(tool_executions);
+                    }
+                    if let Some(compaction) = &compaction {
+                        println!("context manager> {}", describe_compaction(compaction));
+                    }
                 }
 
-                let mut assistant_message = Message::assistant(response.content);
-                assistant_message.thinking = if thinking_enabled {
-                    response.thinking
+                if let Some(updated_messages) = updated_messages {
+                    messages = updated_messages;
                 } else {
-                    None
-                };
-                assistant_message.tool_calls = response.tool_calls;
-                messages.push(assistant_message);
+                    let mut assistant_message = Message::assistant(response.content);
+                    assistant_message.thinking = if thinking_enabled {
+                        response.thinking
+                    } else {
+                        None
+                    };
+                    assistant_message.tool_calls = response.tool_calls;
+                    messages.push(assistant_message);
+                }
             }
             Err(error) => println!("assistant error> {}", error),
         }
+    }
+
+    if let Some((_, runtime)) = &mut mcp {
+        runtime.close().await;
     }
 
     Ok(())

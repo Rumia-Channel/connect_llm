@@ -135,16 +135,21 @@ pub(super) fn convert_request(request: ChatRequest, stream: bool) -> GitHubCopil
             tool_calls,
             tool_call_id,
             tool_name: _,
-            tool_result: _,
+            tool_result,
             tool_error: _,
         } = message;
+        let is_tool_message = role == "tool";
 
         let (reasoning_text, reasoning_opaque) = match thinking {
             Some(thinking) => (thinking.text, thinking.signature.or(thinking.redacted)),
             None => (None, None),
         };
 
-        let content = if role == "assistant" && content.is_empty() {
+        let content = if is_tool_message {
+            Some(serialize_tool_arguments(
+                &tool_result.unwrap_or_else(|| Value::String(content.clone())),
+            ))
+        } else if role == "assistant" && content.is_empty() {
             None
         } else {
             Some(content)
@@ -153,10 +158,12 @@ pub(super) fn convert_request(request: ChatRequest, stream: bool) -> GitHubCopil
         messages.push(GitHubCopilotMessage {
             role,
             content,
-            reasoning_text,
-            reasoning_opaque,
+            reasoning_text: (!is_tool_message).then_some(reasoning_text).flatten(),
+            reasoning_opaque: (!is_tool_message).then_some(reasoning_opaque).flatten(),
             tool_call_id,
-            tool_calls: convert_tool_calls(tool_calls),
+            tool_calls: (!is_tool_message)
+                .then(|| convert_tool_calls(tool_calls))
+                .flatten(),
         });
     }
 

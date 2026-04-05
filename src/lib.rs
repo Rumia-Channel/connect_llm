@@ -16,6 +16,7 @@ pub use context::{
     resolve_model_context_limits, split_text_into_windows,
 };
 pub use mcp::{
-    McpBridge, McpConfig, McpManagedChatResponse, McpServerConfig, McpToolExecution,
+    McpBridge, McpConfig, McpConfiguredServerStatus, McpExportedToolStatus, McpManagedChatResponse,
+    McpRuntime, McpRuntimeStatus, McpServerConfig, McpStreamEvent, McpToolExecution,
     McpToolLoopConfig,
 };

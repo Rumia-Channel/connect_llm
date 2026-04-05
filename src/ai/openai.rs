@@ -355,6 +355,11 @@ mod tests {
             converted.messages[1].tool_call_id.as_deref(),
             Some("call_1")
         );
+        assert_eq!(
+            converted.messages[1].content.as_deref(),
+            Some("{\"temperature_c\":22}")
+        );
+        assert!(converted.messages[1].tool_calls.is_none());
     }
 
     #[test]

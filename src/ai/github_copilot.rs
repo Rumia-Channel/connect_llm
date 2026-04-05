@@ -317,7 +317,10 @@ mod tests {
         auth::{derive_copilot_api_base_url, parse_token_expiry},
         convert,
     };
-    use crate::ai::{ChatRequest, Message, ThinkingConfig, ThinkingEffort, ThinkingOutput};
+    use crate::ai::{
+        ChatRequest, Message, ThinkingConfig, ThinkingEffort, ThinkingOutput, ToolCall,
+    };
+    use serde_json::json;
 
     #[test]
     fn parses_copilot_proxy_base_url() {
@@ -373,6 +376,42 @@ mod tests {
             Some("opaque")
         );
         assert_eq!(converted.reasoning_effort, Some("medium"));
+    }
+
+    #[test]
+    fn converts_tool_results_into_tool_message_content() {
+        let request = ChatRequest {
+            model: "gpt-5.2-codex".to_string(),
+            messages: vec![
+                Message::assistant_tool_calls(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "search".to_string(),
+                    arguments: json!({"query": "さくら AI Engine"}),
+                }]),
+                Message::tool_result(
+                    "call_1",
+                    "search",
+                    json!({"results": [{"title": "さくらのAI Engine"}]}),
+                ),
+            ],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: Some(256),
+            temperature: None,
+            system: None,
+            thinking: None,
+        };
+
+        let converted = convert::convert_request(request, false);
+        assert_eq!(
+            converted.messages[1].content.as_deref(),
+            Some("{\"results\":[{\"title\":\"さくらのAI Engine\"}]}")
+        );
+        assert_eq!(
+            converted.messages[1].tool_call_id.as_deref(),
+            Some("call_1")
+        );
+        assert!(converted.messages[1].tool_calls.is_none());
     }
 
     #[test]
