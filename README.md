@@ -160,7 +160,37 @@ println!("{}", managed.response.content);
 println!("executed {} MCP tools", managed.tool_executions.len());
 ```
 
-現状の bridge は MCP tools を対象にしています。`mcp.json` の common な `command` / `args` / `env` / `cwd` と `url` / `headers` を解釈し、stdio と Streamable HTTP の両方に対応します。`chat()` / `chat_with_context_manager()` に加えて、`chat_stream()` / `chat_stream_with_context_manager()` で streaming の tool loop も扱えます。
+現状の bridge は MCP tools を対象にしています。`mcp.json` の common な `command` / `args` / `env` / `cwd` と remote 用の `url` / `headers` / `authHeader` (`authorization` でも可) / `headersHelper` / `oauth` を解釈し、stdio・Streamable HTTP・legacy SSE に対応します。`url` だけを置いた remote は Streamable HTTP として扱い、legacy SSE を使いたい場合は `type` または `transport` に `"sse"` を指定します。`chat()` / `chat_with_context_manager()` に加えて、`chat_stream()` / `chat_stream_with_context_manager()` で streaming の tool loop も扱えます。
+
+remote MCP の認証まわりは次の扱いです。
+
+- `headers`: 固定ヘッダーをそのまま送ります。Streamable HTTP / legacy SSE のどちらでも使えます。
+- `authHeader` / `authorization`: `Authorization` ヘッダーを 1 本だけ設定したいときの省略形です。`headers.Authorization` と別値で同時指定はできません。
+- `headersHelper`: 外部コマンドの標準出力から JSON のヘッダー一覧を読み取り、`headers` に merge します。helper 側の値が同名ヘッダーを上書きします。
+- `oauth`: 設定したときだけ OAuth を使います。未設定なら OAuth は試しません。`clientId`、`callbackPort`、`authServerMetadataUrl` を指定でき、`authServerMetadataUrl` を入れた場合は自動検出に置き換えずその URL を使います。
+
+```json
+{
+  "mcpServers": {
+    "remote-example": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "authHeader": "Bearer ${MCP_TOKEN}",
+      "headers": {
+        "X-Workspace": "sample"
+      },
+      "headersHelper": "./scripts/mcp-headers-helper.cmd",
+      "oauth": {
+        "clientId": "client-123",
+        "callbackPort": 8080,
+        "authServerMetadataUrl": "https://auth.example.com/.well-known/openid-configuration"
+      }
+    }
+  }
+}
+```
+
+legacy SSE 側でも認証設定の書き方は同じで、transport だけ `"sse"` に切り替えます。
 
 長時間動くアプリでは、毎回 connect/close する `McpBridge` より、接続を保持する `McpRuntime` を使うほうが適しています。sample CLI もこちらを使うので、`/mcp off` かプロセス終了まで MCP server は起動したままです。
 
