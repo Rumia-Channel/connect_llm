@@ -3,8 +3,9 @@ mod settings;
 mod streaming;
 
 use self::io::{
-    persist_generated_images, print_debug_trace, print_mcp_status, print_mcp_tool_executions,
-    print_mcp_tools, print_thinking, print_tool_calls, prompt, prompt_default, prompt_multiline,
+    load_input_image, persist_generated_images, print_debug_trace, print_mcp_status,
+    print_mcp_tool_executions, print_mcp_tools, print_pending_input_images, print_thinking,
+    print_tool_calls, prompt, prompt_default, prompt_multiline,
 };
 use self::settings::{
     build_ai_config, build_thinking_config, describe_codex_effort, ensure_provider_auth_ready,
@@ -13,8 +14,11 @@ use self::settings::{
     select_debug_mode, select_mcp_path, select_model, select_provider, select_stream_mode,
     select_thinking_enabled, temp_client,
 };
-use self::streaming::{send_mcp_request, send_request};
-use connect_llm::{ChatRequest, ContextManager, Message, set_debug_logging};
+use self::streaming::{send_mcp_request, send_multimodal_request, send_request};
+use connect_llm::{
+    ChatRequest, ContentPart, ContextManager, MultimodalChatRequest, RequestMessage,
+    set_debug_logging,
+};
 
 fn describe_compaction(compaction: &connect_llm::ContextCompaction) -> String {
     if compaction.microcompacted_messages > 0 && compaction.summarized_messages > 0 {
@@ -82,7 +86,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!(
-        "Commands: /help, /reset, /model <id>, /thinking <on|off>, /codex-effort <default|minimal|low|medium|high|xhigh>, /stream <on|off>, /debug <on|off>, /mcp <path|off>, /mcp-status, /mcp-tools, /exit"
+        "Commands: /help, /reset, /model <id>, /thinking <on|off>, /codex-effort <default|minimal|low|medium|high|xhigh>, /stream <on|off>, /debug <on|off>, /image <path-or-url>, /images, /image-clear, /mcp <path|off>, /mcp-status, /mcp-tools, /exit"
     );
     println!("Provider: {}", provider.name());
     println!("Model: {}", model);
@@ -109,13 +113,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    let mut messages: Vec<Message> = Vec::new();
+    let mut messages: Vec<RequestMessage> = Vec::new();
+    let mut pending_images = Vec::new();
 
     loop {
         let input = prompt_multiline("you", "Enter inserts newline. Ctrl+Enter sends.")?;
         let trimmed = input.trim();
 
-        if trimmed.is_empty() {
+        if trimmed.is_empty() && pending_images.is_empty() {
             continue;
         }
 
@@ -131,15 +136,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("  /codex-effort <default|minimal|low|medium|high|xhigh>");
             println!("  /stream <on|off>");
             println!("  /debug <on|off>");
+            println!("  /image <path-or-url>");
+            println!("  /images");
+            println!("  /image-clear");
             println!("  /mcp <path|off>");
             println!("  /mcp-status");
             println!("  /mcp-tools");
             println!("  /exit");
+            println!("  note: image prompts require MCP off");
             continue;
         }
 
         if trimmed.eq_ignore_ascii_case("/reset") {
             messages.clear();
+            pending_images.clear();
             println!("history cleared");
             continue;
         }
@@ -227,6 +237,47 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
+        if let Some(source) = trimmed.strip_prefix("/image ") {
+            if !provider.supports_input_images() {
+                println!(
+                    "image input unavailable> {} does not support input images in connect_llm 0.2.1",
+                    provider.name()
+                );
+                continue;
+            }
+
+            let source = source.trim();
+            if matches!(provider, connect_llm::AiProvider::Gemini)
+                && (source.starts_with("http://") || source.starts_with("https://"))
+            {
+                println!(
+                    "image input unavailable> {} requires local files or data URLs; remote image URLs are not accepted",
+                    provider.name()
+                );
+                continue;
+            }
+
+            match load_input_image(source) {
+                Ok(image) => {
+                    pending_images.push(image);
+                    println!("images queued> {}", pending_images.len());
+                }
+                Err(error) => println!("image input error> {}", error),
+            }
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("/images") {
+            print_pending_input_images(&pending_images);
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("/image-clear") {
+            pending_images.clear();
+            println!("images cleared");
+            continue;
+        }
+
         if let Some(path) = trimmed.strip_prefix("/mcp ") {
             match normalize_mcp_path(path.trim()) {
                 Ok(next_path) => match load_mcp_runtime_from_path(next_path.as_deref()).await {
@@ -278,21 +329,66 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let mut request_messages = sanitize_messages_for_request(&messages, thinking_enabled);
-        request_messages.push(Message::user(input.clone()));
-        messages.push(Message::user(input));
-
-        let request = ChatRequest {
-            model: model.clone(),
-            messages: request_messages,
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            thinking: build_thinking_config(provider, thinking_enabled, codex_effort),
+        let current_user_message = if pending_images.is_empty() {
+            RequestMessage::user(input.clone())
+        } else {
+            let mut parts = Vec::new();
+            if !input.is_empty() {
+                parts.push(ContentPart::text(input.clone()));
+            }
+            parts.extend(pending_images.iter().cloned().map(ContentPart::image));
+            RequestMessage::user_parts(parts)
         };
+        let has_prior_image_history = messages.iter().any(RequestMessage::contains_input_images);
+        let use_multimodal_request = current_user_message.contains_input_images();
+        request_messages.push(current_user_message.clone());
 
-        match if let Some((_, runtime)) = &mut mcp {
+        let thinking = build_thinking_config(provider, thinking_enabled, codex_effort);
+
+        match if has_prior_image_history {
+            Err(connect_llm::AiError::configuration(
+                "sample CLI follow-up turns after an image input are not supported yet; use /reset before continuing",
+            )
+            .with_provider(provider)
+            .with_operation("sample_cli"))
+        } else if use_multimodal_request {
+            if let Some((path, _)) = &mcp {
+                Err(connect_llm::AiError::configuration(
+                    "sample CLI does not support MCP tool loops with multimodal image history yet",
+                )
+                .with_provider(provider)
+                .with_operation("sample_cli")
+                .with_target(path.clone()))
+            } else {
+                let request = MultimodalChatRequest {
+                    model: model.clone(),
+                    messages: request_messages,
+                    tools: Vec::new(),
+                    tool_choice: None,
+                    max_tokens: None,
+                    temperature: None,
+                    system: None,
+                    thinking,
+                };
+                send_multimodal_request(client.as_ref(), request, use_stream, thinking_enabled)
+                    .await
+                    .map(|response| (response, None, None, None))
+            }
+        } else if let Some((_, runtime)) = &mut mcp {
+            let request = ChatRequest {
+                model: model.clone(),
+                messages: request_messages
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<Vec<_>, _>>()?,
+                tools: Vec::new(),
+                tool_choice: None,
+                max_tokens: None,
+                temperature: None,
+                system: None,
+                thinking,
+            };
+
             if use_stream {
                 send_mcp_request(
                     runtime,
@@ -325,6 +421,19 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     })
             }
         } else {
+            let request = ChatRequest {
+                model: model.clone(),
+                messages: request_messages
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<Vec<_>, _>>()?,
+                tools: Vec::new(),
+                tool_choice: None,
+                max_tokens: None,
+                temperature: None,
+                system: None,
+                thinking,
+            };
             let prepared = context_manager
                 .prepare_request(client.as_ref(), request)
                 .await?;
@@ -378,14 +487,23 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         println!("context manager> {}", describe_compaction(compaction));
                     }
                 }
+                if current_user_message.contains_input_images() {
+                    println!(
+                        "sample CLI> image turns are single-turn only right now; use /reset before a follow-up"
+                    );
+                }
 
                 if let Some(updated_messages) = updated_messages {
-                    messages = updated_messages;
+                    messages = updated_messages.into_iter().map(Into::into).collect();
                 } else {
-                    let mut assistant_message =
-                        Message::assistant(response.content).with_tool_calls(response.tool_calls);
+                    if current_user_message.contains_input_images() {
+                        pending_images.clear();
+                    }
+                    messages.push(current_user_message);
+                    let mut assistant_message = RequestMessage::assistant(response.content.clone())
+                        .with_tool_calls(response.tool_calls.clone());
                     if thinking_enabled {
-                        if let Some(thinking) = response.thinking {
+                        if let Some(thinking) = response.thinking.clone() {
                             assistant_message = assistant_message.with_thinking(thinking);
                         }
                     }

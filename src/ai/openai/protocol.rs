@@ -25,13 +25,37 @@ pub(super) struct OpenAiRequest {
 pub(super) struct OpenAiMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<OpenAiMessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(untagged)]
+pub(super) enum OpenAiMessageContent {
+    Text(String),
+    Parts(Vec<OpenAiContentPart>),
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(super) struct OpenAiContentPart {
+    #[serde(rename = "type")]
+    pub part_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<OpenAiImageUrlPart>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(super) struct OpenAiImageUrlPart {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

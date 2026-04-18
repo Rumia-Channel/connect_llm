@@ -1,6 +1,6 @@
 use connect_llm::{
     ChatRequest, ChatResponse, DebugTrace, GeneratedImage, McpManagedChatResponse, McpRuntime,
-    McpStreamEvent, ThinkingOutput, ToolCall, Usage,
+    McpStreamEvent, MultimodalChatRequest, ThinkingOutput, ToolCall, Usage,
 };
 use futures_util::StreamExt;
 use std::{
@@ -33,10 +33,35 @@ pub(crate) async fn send_request(
         let chunk = chunk?;
         print_stream_chunk(&chunk, include_thinking, &mut state)?;
         response_builder.ingest(&chunk);
+    }
 
-        if chunk.done {
-            break;
+    finish_stream_output(&state);
+    Ok(response_builder.finish(include_thinking))
+}
+
+pub(crate) async fn send_multimodal_request(
+    client: &dyn connect_llm::AiClient,
+    request: MultimodalChatRequest,
+    use_stream: bool,
+    include_thinking: bool,
+) -> Result<ChatResponse, connect_llm::AiError> {
+    if !use_stream {
+        let mut response = client.chat_multimodal(request).await?;
+        if !include_thinking {
+            response.thinking = None;
         }
+        return Ok(response);
+    }
+
+    let model = request.model.clone();
+    let mut stream = client.chat_multimodal_stream(request);
+    let mut state = PrintedStreamState::default();
+    let mut response_builder = StreamResponseBuilder::new(model);
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        print_stream_chunk(&chunk, include_thinking, &mut state)?;
+        response_builder.ingest(&chunk);
     }
 
     finish_stream_output(&state);

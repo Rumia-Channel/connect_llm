@@ -28,6 +28,7 @@ connect_llm = { git = "https://github.com/Rumia-Channel/connect_llm.git" }
 - Tool Use の定義送信と tool call / tool result の送受信
 - caller が渡した `mcp.json` を bridge して MCP tools を全 provider へ共通 tool として公開
 - Gemini native で返ってきた画像出力の受信
+- 0.2.1 additive multimodal image input API (`MultimodalChatRequest` / `RequestMessage` / `ContentPart`)
 
 ## 公開 API
 
@@ -43,14 +44,20 @@ connect_llm = { git = "https://github.com/Rumia-Channel/connect_llm.git" }
 - `AiErrorKind`
 - `ChatRequest`
 - `ChatResponse`
+- `ContentPart`
 - `DebugTrace`
 - `GeneratedImage`
+- `ImageDetail`
+- `ImageSource`
+- `InputImage`
 - `ContextManager`
 - `ContextManagerConfig`
 - `PreparedChatRequest`
 - `ManagedChatResponse`
 - `ModelContextLimits`
 - `Message`
+- `MultimodalChatRequest`
+- `RequestMessage`
 - `StreamChunk`
 - `ThinkingConfig`
 - `ThinkingEffort`
@@ -72,6 +79,52 @@ connect_llm = { git = "https://github.com/Rumia-Channel/connect_llm.git" }
 - `TextWindowConfig`
 
 `src/lib.rs` から再 export されているので、通常は `connect_llm::...` で参照できます。
+
+## 0.2.1 multimodal image input
+
+0.2.1 では 0.2.0 の `Message` / `ChatRequest` を壊さず、並行する additive API として multimodal request 型を追加しました。
+
+- 新しい request 側型:
+  - `RequestMessage`
+  - `ContentPart`
+  - `InputImage`
+  - `ImageSource`
+  - `ImageDetail`
+  - `MultimodalChatRequest`
+- `Message` / `ChatRequest` から新型への変換を用意しています。
+- `AiClient::chat_multimodal()` / `chat_multimodal_stream()` を追加しました。
+- text-only の `MultimodalChatRequest` は既存 text API に安全に downgrade されます。
+- 画像付き request は `AiProvider::supports_input_images()` で事前判定できます。
+
+```rust
+use connect_llm::{
+    AiAuth, AiConfig, AiProvider, ContentPart, InputImage, MultimodalChatRequest, RequestMessage,
+};
+
+let provider = AiProvider::OpenAi;
+let client = provider.create_client(
+    AiConfig::new(provider)
+        .with_auth(AiAuth::BearerToken(std::env::var("OPENAI_API_KEY")?)),
+)?;
+
+let request = MultimodalChatRequest::new(
+    "gpt-5.4",
+    vec![RequestMessage::user_parts(vec![
+        ContentPart::text("この画像を説明して"),
+        ContentPart::image(InputImage::from_base64("image/png", png_base64)),
+    ])],
+);
+
+let response = client.chat_multimodal(request).await?;
+println!("{}", response.content);
+```
+
+provider ごとの扱いは次のとおりです。
+
+- OpenAI 互換系: typed content parts を送ります。base64 画像は data URL 化し、URL 画像もそのまま送れます。Google AI Studio compatibility endpoint もここに含みます。
+- Anthropic: image block を送り、base64 と remote URL の両方を使えます。base64 側の media type は JPEG / PNG / GIF / WebP のみ受け付けます。
+- Gemini native: `inlineData` + base64 を送ります。remote URL image は明示エラーにします。
+- GitHub Copilot / OpenAI Codex: まだ text-only です。画像付き request は明示エラーにします。
 
 ## 0.2.0 の破壊的変更
 
@@ -217,6 +270,17 @@ remote MCP の認証まわりは次の扱いです。
 legacy SSE 側でも認証設定の書き方は同じで、transport だけ `"sse"` に切り替えます。
 
 長時間動くアプリでは、毎回 connect/close する `McpBridge` より、接続を保持する `McpRuntime` を使うほうが適しています。sample CLI もこちらを使うので、`/mcp off` かプロセス終了まで MCP server は起動したままです。
+
+## sample CLI の画像入力
+
+sample CLI (`cargo run --features sample-cli`) では次のコマンドで次の prompt に画像を積めます。
+
+- `/image <path-or-url>`
+- `/images`
+- `/image-clear`
+
+local file は base64 化して送信します。URL は provider が URL image を受けられる場合だけ使えます。  
+現状 sample CLI では、画像付き会話は **1 turn 分の direct chat のみ** 対応です。MCP/context manager 付きの multimodal bridge はまだ入れていないため、画像を送ったあとの follow-up を続けたい場合はいったん `/reset` してください。
 
 `McpBridge::status()` で設定済み server の一覧、`McpRuntime::status()` で現在の接続状態と公開中 tool alias の一覧を取得できます。sample CLI では `/mcp-status` と `/mcp-tools` で確認できます。
 

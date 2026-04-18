@@ -1,10 +1,11 @@
 use super::protocol::{
-    AnthropicRequest, AnthropicRequestContentBlock, AnthropicRequestMessage, AnthropicResponse,
-    AnthropicThinkingRequest, AnthropicToolChoice, AnthropicToolDefinition,
+    AnthropicImageSource, AnthropicRequest, AnthropicRequestContentBlock, AnthropicRequestMessage,
+    AnthropicResponse, AnthropicThinkingRequest, AnthropicToolChoice, AnthropicToolDefinition,
 };
 use crate::ai::{
-    ChatRequest, ChatResponse, DebugTrace, Message, ThinkingConfig, ThinkingDisplay,
-    ThinkingOutput, ToolCall, ToolChoice, ToolDefinition, Usage,
+    ChatRequest, ChatResponse, ContentPart, DebugTrace, Message, MultimodalChatRequest,
+    RequestMessage, ThinkingConfig, ThinkingDisplay, ThinkingOutput, ToolCall, ToolChoice,
+    ToolDefinition, Usage, unsupported_image_url_error,
 };
 
 pub(super) fn convert_tools(tools: &[ToolDefinition]) -> Option<Vec<AnthropicToolDefinition>> {
@@ -45,15 +46,49 @@ pub(super) fn convert_tool_choice(choice: Option<&ToolChoice>) -> Option<Anthrop
     }
 }
 
+fn text_block(text: String) -> AnthropicRequestContentBlock {
+    AnthropicRequestContentBlock {
+        content_type: "text".to_string(),
+        text: Some(text),
+        thinking: None,
+        signature: None,
+        data: None,
+        source: None,
+        id: None,
+        name: None,
+        input: None,
+        tool_use_id: None,
+        content: None,
+        is_error: None,
+    }
+}
+
+fn normalize_anthropic_media_type(media_type: &str) -> Option<&'static str> {
+    match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
 pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessage {
+    convert_multimodal_request_message(message.into())
+        .expect("text-only ChatRequest conversion must not fail")
+}
+
+pub(super) fn convert_multimodal_request_message(
+    message: RequestMessage,
+) -> Result<AnthropicRequestMessage, crate::ai::AiError> {
     match message {
-        Message::Tool {
+        RequestMessage::Tool {
             tool_call_id,
             tool_name,
             result,
             is_error,
             ..
-        } => AnthropicRequestMessage {
+        } => Ok(AnthropicRequestMessage {
             role: "user".to_string(),
             content: vec![AnthropicRequestContentBlock {
                 content_type: "tool_result".to_string(),
@@ -61,6 +96,7 @@ pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessa
                 thinking: None,
                 signature: None,
                 data: None,
+                source: None,
                 id: None,
                 name: Some(tool_name),
                 input: None,
@@ -68,31 +104,82 @@ pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessa
                 content: Some(result),
                 is_error: is_error.then_some(true),
             }],
-        },
-        Message::User {
+        }),
+        RequestMessage::User { content, .. } => {
+            let mut blocks = Vec::new();
+            for part in content {
+                match part {
+                    ContentPart::Text { text } => blocks.push(text_block(text)),
+                    ContentPart::Image { image } => {
+                        if let Some((mime_type, data_base64)) = image.as_inline_base64() {
+                            let Some(media_type) = normalize_anthropic_media_type(&mime_type)
+                            else {
+                                return Err(crate::ai::AiError::configuration(
+                                    "Anthropic input images must be JPEG, PNG, GIF, or WebP",
+                                )
+                                .with_provider(crate::ai::AiProvider::Anthropic)
+                                .with_operation("chat_multimodal")
+                                .with_target("/v1/messages"));
+                            };
+                            blocks.push(AnthropicRequestContentBlock {
+                                content_type: "image".to_string(),
+                                text: None,
+                                thinking: None,
+                                signature: None,
+                                data: None,
+                                source: Some(AnthropicImageSource {
+                                    source_type: "base64",
+                                    media_type: Some(media_type.to_string()),
+                                    data: Some(data_base64),
+                                    url: None,
+                                }),
+                                id: None,
+                                name: None,
+                                input: None,
+                                tool_use_id: None,
+                                content: None,
+                                is_error: None,
+                            });
+                        } else if let Some(url) = image.as_url() {
+                            blocks.push(AnthropicRequestContentBlock {
+                                content_type: "image".to_string(),
+                                text: None,
+                                thinking: None,
+                                signature: None,
+                                data: None,
+                                source: Some(AnthropicImageSource {
+                                    source_type: "url",
+                                    media_type: None,
+                                    data: None,
+                                    url: Some(url.to_string()),
+                                }),
+                                id: None,
+                                name: None,
+                                input: None,
+                                tool_use_id: None,
+                                content: None,
+                                is_error: None,
+                            });
+                        } else {
+                            return Err(unsupported_image_url_error(
+                                crate::ai::AiProvider::Anthropic,
+                                "chat_multimodal",
+                                "/v1/messages",
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(AnthropicRequestMessage {
+                role: "user".to_string(),
+                content: blocks,
+            })
+        }
+        RequestMessage::Assistant {
             content,
-            created_at_ms: _,
-        } => AnthropicRequestMessage {
-            role: "user".to_string(),
-            content: vec![AnthropicRequestContentBlock {
-                content_type: "text".to_string(),
-                text: Some(content),
-                thinking: None,
-                signature: None,
-                data: None,
-                id: None,
-                name: None,
-                input: None,
-                tool_use_id: None,
-                content: None,
-                is_error: None,
-            }],
-        },
-        Message::Assistant {
-            content,
-            created_at_ms: _,
             thinking,
             tool_calls,
+            ..
         } => {
             let mut blocks = Vec::new();
 
@@ -104,6 +191,7 @@ pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessa
                         thinking: Some(thinking.text.unwrap_or_default()),
                         signature: thinking.signature,
                         data: None,
+                        source: None,
                         id: None,
                         name: None,
                         input: None,
@@ -120,6 +208,7 @@ pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessa
                         thinking: None,
                         signature: None,
                         data: Some(redacted),
+                        source: None,
                         id: None,
                         name: None,
                         input: None,
@@ -137,6 +226,7 @@ pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessa
                     thinking: None,
                     signature: None,
                     data: None,
+                    source: None,
                     id: Some(tool_call.id),
                     name: Some(tool_call.name),
                     input: Some(tool_call.arguments),
@@ -147,27 +237,50 @@ pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessa
             }
 
             if !content.is_empty() {
-                blocks.push(AnthropicRequestContentBlock {
-                    content_type: "text".to_string(),
-                    text: Some(content),
-                    thinking: None,
-                    signature: None,
-                    data: None,
-                    id: None,
-                    name: None,
-                    input: None,
-                    tool_use_id: None,
-                    content: None,
-                    is_error: None,
-                });
+                blocks.push(text_block(content));
             }
 
-            AnthropicRequestMessage {
+            Ok(AnthropicRequestMessage {
                 role: "assistant".to_string(),
                 content: blocks,
-            }
+            })
         }
     }
+}
+
+pub(super) fn convert_request(request: ChatRequest) -> AnthropicRequest {
+    convert_multimodal_request(request.into())
+        .expect("text-only ChatRequest conversion must not fail")
+}
+
+pub(super) fn convert_multimodal_request(
+    request: MultimodalChatRequest,
+) -> Result<AnthropicRequest, crate::ai::AiError> {
+    let MultimodalChatRequest {
+        model,
+        messages,
+        tools,
+        tool_choice,
+        max_tokens,
+        temperature,
+        system,
+        thinking,
+    } = request;
+
+    Ok(AnthropicRequest {
+        model,
+        messages: messages
+            .into_iter()
+            .map(convert_multimodal_request_message)
+            .collect::<Result<Vec<_>, _>>()?,
+        tools: convert_tools(&tools),
+        tool_choice: convert_tool_choice(tool_choice.as_ref()),
+        max_tokens: max_tokens.unwrap_or(4096),
+        system,
+        temperature,
+        stream: None,
+        thinking: convert_thinking_config(thinking.as_ref()),
+    })
 }
 
 pub(super) fn convert_thinking_config(
@@ -187,31 +300,6 @@ pub(super) fn convert_thinking_config(
             None => None,
         },
     })
-}
-
-pub(super) fn convert_request(request: ChatRequest) -> AnthropicRequest {
-    let ChatRequest {
-        model,
-        messages,
-        tools,
-        tool_choice,
-        max_tokens,
-        temperature,
-        system,
-        thinking,
-    } = request;
-
-    AnthropicRequest {
-        model,
-        messages: messages.into_iter().map(convert_request_message).collect(),
-        tools: convert_tools(&tools),
-        tool_choice: convert_tool_choice(tool_choice.as_ref()),
-        max_tokens: max_tokens.unwrap_or(4096),
-        system,
-        temperature,
-        stream: None,
-        thinking: convert_thinking_config(thinking.as_ref()),
-    }
 }
 
 pub(super) fn convert_response(

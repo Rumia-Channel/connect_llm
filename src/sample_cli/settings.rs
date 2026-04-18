@@ -1,8 +1,8 @@
 use crate::sample_cli::io::{prompt, prompt_default};
 use connect_llm::{
-    AiAuth, AiConfig, AiProvider, McpBridge, McpConfig, McpRuntime, Message, ThinkingConfig,
-    ThinkingEffort, github_copilot_auth_path, login_github_copilot_via_device,
-    login_openai_codex_via_browser, openai_codex_auth_path,
+    AiAuth, AiConfig, AiProvider, McpBridge, McpConfig, McpRuntime, ThinkingConfig, ThinkingEffort,
+    github_copilot_auth_path, login_github_copilot_via_device, login_openai_codex_via_browser,
+    openai_codex_auth_path,
 };
 use std::{path::Path, sync::Arc};
 
@@ -335,9 +335,9 @@ pub(crate) fn build_thinking_config(
 }
 
 pub(crate) fn sanitize_messages_for_request(
-    messages: &[Message],
+    messages: &[connect_llm::RequestMessage],
     include_thinking: bool,
-) -> Vec<Message> {
+) -> Vec<connect_llm::RequestMessage> {
     messages
         .iter()
         .cloned()

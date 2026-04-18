@@ -5,8 +5,8 @@ mod protocol;
 
 use self::protocol::{GeminiResponse, api_error_from_response};
 use super::{
-    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk, ToolCallDelta,
-    capture_debug_json, capture_debug_text,
+    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, MultimodalChatRequest,
+    StreamChunk, ToolCallDelta, capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -57,15 +57,16 @@ impl GeminiClient {
     fn models_url(base_url: &str) -> String {
         format!("{}/models", Self::normalized_base_url(base_url))
     }
-}
 
-#[async_trait::async_trait]
-impl AiClient for GeminiClient {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
-        let api_key = self.config.require_api_key("chat")?;
+    async fn chat_impl(
+        &self,
+        request: MultimodalChatRequest,
+        operation: &'static str,
+    ) -> Result<ChatResponse, AiError> {
+        let api_key = self.config.require_api_key(operation)?;
         let url = Self::generate_content_url(self.config.base_url(), &request.model);
         let request_model = request.model.clone();
-        let gemini_request = convert::convert_request(request);
+        let gemini_request = convert::convert_multimodal_request(request)?;
         let request_debug =
             capture_debug_json(&format!("gemini request POST {}", url), &gemini_request);
 
@@ -102,17 +103,18 @@ impl AiClient for GeminiClient {
         ))
     }
 
-    fn chat_stream(
+    fn chat_stream_impl(
         &self,
-        request: ChatRequest,
+        request: MultimodalChatRequest,
+        operation: &'static str,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
         let url = Self::stream_generate_content_url(self.config.base_url(), &request.model);
-        let api_key = self
-            .config
-            .require_api_key("chat_stream")
-            .map(str::to_string);
+        let api_key = self.config.require_api_key(operation).map(str::to_string);
         let request_model = request.model.clone();
-        let gemini_request = convert::convert_request(request);
+        let gemini_request = match convert::convert_multimodal_request(request) {
+            Ok(request) => request,
+            Err(error) => return futures_util::stream::once(async move { Err(error) }).boxed(),
+        };
         let request_debug = capture_debug_json(
             &format!("gemini stream request POST {}", url),
             &gemini_request,
@@ -343,6 +345,34 @@ impl AiClient for GeminiClient {
         };
 
         stream.boxed()
+    }
+}
+
+#[async_trait::async_trait]
+impl AiClient for GeminiClient {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
+        self.chat_impl(request.into(), "chat").await
+    }
+
+    async fn chat_multimodal(
+        &self,
+        request: MultimodalChatRequest,
+    ) -> Result<ChatResponse, AiError> {
+        self.chat_impl(request, "chat_multimodal").await
+    }
+
+    fn chat_stream(
+        &self,
+        request: ChatRequest,
+    ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
+        self.chat_stream_impl(request.into(), "chat_stream")
+    }
+
+    fn chat_multimodal_stream(
+        &self,
+        request: MultimodalChatRequest,
+    ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
+        self.chat_stream_impl(request, "chat_multimodal_stream")
     }
 
     fn config(&self) -> &AiConfig {

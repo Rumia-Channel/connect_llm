@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use connect_llm::{
-    DebugTrace, GeneratedImage, McpExportedToolStatus, McpRuntimeStatus, McpToolExecution,
-    ThinkingOutput, ToolCall,
+    DebugTrace, GeneratedImage, ImageSource, InputImage, McpExportedToolStatus, McpRuntimeStatus,
+    McpToolExecution, ThinkingOutput, ToolCall,
 };
 use crossterm::{
     cursor::{MoveToColumn, MoveUp},
@@ -181,6 +181,53 @@ pub(crate) fn persist_generated_images(images: &[GeneratedImage]) -> Result<(), 
     Ok(())
 }
 
+pub(crate) fn load_input_image(source: &str) -> Result<InputImage, io::Error> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "image path or URL is required",
+        ));
+    }
+
+    if looks_like_remote_image_source(trimmed) {
+        return Ok(InputImage::from_url(trimmed.to_string()));
+    }
+
+    let path = PathBuf::from(trimmed);
+    let bytes = fs::read(&path)?;
+    let Some(mime_type) = detect_input_image_mime_type(&path, &bytes) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unsupported image type; use png, jpg, webp, gif, bmp, or svg",
+        ));
+    };
+
+    Ok(InputImage::from_base64(mime_type, STANDARD.encode(bytes)))
+}
+
+pub(crate) fn print_pending_input_images(images: &[InputImage]) {
+    if images.is_empty() {
+        println!("images> none queued");
+        return;
+    }
+
+    for (index, image) in images.iter().enumerate() {
+        match &image.source {
+            ImageSource::Base64 {
+                mime_type,
+                data_base64,
+            } => println!(
+                "images> [{}] embedded {} ({} base64 chars)",
+                index,
+                mime_type,
+                data_base64.len()
+            ),
+            ImageSource::Url { url } => println!("images> [{}] {}", index, url),
+        }
+    }
+}
+
 pub(crate) fn prompt(label: &str, hint: &str) -> Result<String, io::Error> {
     print!("{}> ", label);
     io::stdout().flush()?;
@@ -208,10 +255,25 @@ pub(crate) fn prompt_default(label: &str, default: &str, hint: &str) -> Result<S
     }
 }
 
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn new() -> Result<Self, io::Error> {
+        enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
+}
+
 pub(crate) fn prompt_multiline(label: &str, hint: &str) -> Result<String, io::Error> {
     let _ = hint;
     let mut stdout = io::stdout();
-    enable_raw_mode()?;
+    let _raw_mode = RawModeGuard::new()?;
 
     let mut buffer = String::new();
     let mut rendered_lines = 0usize;
@@ -254,7 +316,6 @@ pub(crate) fn prompt_multiline(label: &str, hint: &str) -> Result<String, io::Er
         }
     };
 
-    disable_raw_mode()?;
     println!();
     result
 }
@@ -319,4 +380,43 @@ fn detect_image_extension(mime_type: Option<&str>, bytes: &[u8]) -> &'static str
     }
 
     "bin"
+}
+
+fn looks_like_remote_image_source(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://") || value.starts_with("data:")
+}
+
+fn detect_input_image_mime_type(path: &std::path::Path, bytes: &[u8]) -> Option<&'static str> {
+    if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+        match extension.to_ascii_lowercase().as_str() {
+            "png" => return Some("image/png"),
+            "jpg" | "jpeg" => return Some("image/jpeg"),
+            "webp" => return Some("image/webp"),
+            "gif" => return Some("image/gif"),
+            "bmp" => return Some("image/bmp"),
+            "svg" => return Some("image/svg+xml"),
+            _ => {}
+        }
+    }
+
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    if bytes.starts_with(b"<svg") || bytes.windows(4).any(|window| window == b"<svg") {
+        return Some("image/svg+xml");
+    }
+
+    None
 }

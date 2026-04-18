@@ -8,7 +8,7 @@ pub mod openai;
 pub mod openai_codex;
 pub mod providers;
 
-use futures_util::stream::BoxStream;
+use futures_util::{StreamExt, stream::BoxStream};
 pub use github_copilot::{
     GitHubCopilotDeviceAuth, GitHubCopilotDeviceAuthOptions, github_copilot_auth_path,
     login_github_copilot_via_device,
@@ -93,6 +93,478 @@ pub enum Message {
         is_error: bool,
         created_at_ms: Option<u64>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageDetail {
+    Auto,
+    Low,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 {
+        mime_type: String,
+        data_base64: String,
+    },
+    Url {
+        url: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputImage {
+    pub source: ImageSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ImageDetail>,
+}
+
+impl InputImage {
+    pub fn from_base64(mime_type: impl Into<String>, data_base64: impl Into<String>) -> Self {
+        Self {
+            source: ImageSource::Base64 {
+                mime_type: mime_type.into(),
+                data_base64: data_base64.into(),
+            },
+            detail: None,
+        }
+    }
+
+    pub fn from_url(url: impl Into<String>) -> Self {
+        Self {
+            source: ImageSource::Url { url: url.into() },
+            detail: None,
+        }
+    }
+
+    pub fn with_detail(mut self, detail: ImageDetail) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+
+    pub fn as_url(&self) -> Option<&str> {
+        match &self.source {
+            ImageSource::Url { url } => Some(url),
+            ImageSource::Base64 { .. } => None,
+        }
+    }
+
+    pub fn as_data_url(&self) -> Option<String> {
+        match &self.source {
+            ImageSource::Base64 {
+                mime_type,
+                data_base64,
+            } => Some(format!("data:{};base64,{}", mime_type, data_base64)),
+            ImageSource::Url { url } => Some(url.clone()),
+        }
+    }
+
+    pub(crate) fn as_inline_base64(&self) -> Option<(String, String)> {
+        match &self.source {
+            ImageSource::Base64 {
+                mime_type,
+                data_base64,
+            } => Some((mime_type.clone(), data_base64.clone())),
+            ImageSource::Url { url } => parse_data_url(url),
+        }
+    }
+
+    pub fn is_url(&self) -> bool {
+        matches!(self.source, ImageSource::Url { .. })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    Image { image: InputImage },
+}
+
+impl ContentPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub fn image(image: InputImage) -> Self {
+        Self::Image { image }
+    }
+
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            ContentPart::Text { text } => Some(text),
+            ContentPart::Image { .. } => None,
+        }
+    }
+
+    pub fn as_image(&self) -> Option<&InputImage> {
+        match self {
+            ContentPart::Text { .. } => None,
+            ContentPart::Image { image } => Some(image),
+        }
+    }
+}
+
+impl From<String> for ContentPart {
+    fn from(value: String) -> Self {
+        Self::text(value)
+    }
+}
+
+impl From<&str> for ContentPart {
+    fn from(value: &str) -> Self {
+        Self::text(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RequestMessage {
+    User {
+        content: Vec<ContentPart>,
+        created_at_ms: Option<u64>,
+    },
+    Assistant {
+        content: String,
+        created_at_ms: Option<u64>,
+        thinking: Option<ThinkingOutput>,
+        tool_calls: Vec<ToolCall>,
+    },
+    Tool {
+        tool_call_id: String,
+        tool_name: String,
+        result: Value,
+        is_error: bool,
+        created_at_ms: Option<u64>,
+    },
+}
+
+impl RequestMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::user_parts(vec![ContentPart::text(content)])
+    }
+
+    pub fn user_parts(content: Vec<ContentPart>) -> Self {
+        Self::User {
+            content,
+            created_at_ms: Message::now_timestamp_ms(),
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::Assistant {
+            content: content.into(),
+            created_at_ms: Message::now_timestamp_ms(),
+            thinking: None,
+            tool_calls: Vec::new(),
+        }
+    }
+
+    pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self::Assistant {
+            content: String::new(),
+            created_at_ms: Message::now_timestamp_ms(),
+            thinking: None,
+            tool_calls,
+        }
+    }
+
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        result: Value,
+    ) -> Self {
+        Self::Tool {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            result,
+            is_error: false,
+            created_at_ms: Message::now_timestamp_ms(),
+        }
+    }
+
+    pub fn with_created_at_ms(mut self, created_at_ms: u64) -> Self {
+        match &mut self {
+            RequestMessage::User {
+                created_at_ms: slot,
+                ..
+            }
+            | RequestMessage::Assistant {
+                created_at_ms: slot,
+                ..
+            }
+            | RequestMessage::Tool {
+                created_at_ms: slot,
+                ..
+            } => *slot = Some(created_at_ms),
+        }
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: ThinkingOutput) -> Self {
+        if let RequestMessage::Assistant {
+            thinking: current, ..
+        } = &mut self
+        {
+            *current = Some(thinking);
+        }
+        self
+    }
+
+    pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
+        if let RequestMessage::Assistant {
+            tool_calls: current,
+            ..
+        } = &mut self
+        {
+            *current = tool_calls;
+        }
+        self
+    }
+
+    pub fn role(&self) -> &'static str {
+        match self {
+            RequestMessage::User { .. } => "user",
+            RequestMessage::Assistant { .. } => "assistant",
+            RequestMessage::Tool { .. } => "tool",
+        }
+    }
+
+    pub fn created_at_ms(&self) -> Option<u64> {
+        match self {
+            RequestMessage::User { created_at_ms, .. }
+            | RequestMessage::Assistant { created_at_ms, .. }
+            | RequestMessage::Tool { created_at_ms, .. } => *created_at_ms,
+        }
+    }
+
+    pub fn content_parts(&self) -> Option<&[ContentPart]> {
+        match self {
+            RequestMessage::User { content, .. } => Some(content),
+            RequestMessage::Assistant { .. } | RequestMessage::Tool { .. } => None,
+        }
+    }
+
+    pub fn content_parts_mut(&mut self) -> Option<&mut Vec<ContentPart>> {
+        match self {
+            RequestMessage::User { content, .. } => Some(content),
+            RequestMessage::Assistant { .. } | RequestMessage::Tool { .. } => None,
+        }
+    }
+
+    pub fn content_text(&self) -> Option<String> {
+        match self {
+            RequestMessage::User { content, .. } => Some(join_text_parts(content)),
+            RequestMessage::Assistant { content, .. } => Some(content.clone()),
+            RequestMessage::Tool { .. } => None,
+        }
+    }
+
+    pub fn contains_input_images(&self) -> bool {
+        matches!(
+            self,
+            RequestMessage::User { content, .. }
+                if content.iter().any(|part| matches!(part, ContentPart::Image { .. }))
+        )
+    }
+
+    pub fn thinking(&self) -> Option<&ThinkingOutput> {
+        match self {
+            RequestMessage::Assistant { thinking, .. } => thinking.as_ref(),
+            RequestMessage::User { .. } | RequestMessage::Tool { .. } => None,
+        }
+    }
+
+    pub fn clear_thinking(&mut self) {
+        if let RequestMessage::Assistant { thinking, .. } = self {
+            *thinking = None;
+        }
+    }
+
+    pub fn tool_calls(&self) -> &[ToolCall] {
+        match self {
+            RequestMessage::Assistant { tool_calls, .. } => tool_calls,
+            RequestMessage::User { .. } | RequestMessage::Tool { .. } => &[],
+        }
+    }
+}
+
+impl From<Message> for RequestMessage {
+    fn from(message: Message) -> Self {
+        match message {
+            Message::User {
+                content,
+                created_at_ms,
+            } => Self::User {
+                content: vec![ContentPart::text(content)],
+                created_at_ms,
+            },
+            Message::Assistant {
+                content,
+                created_at_ms,
+                thinking,
+                tool_calls,
+            } => Self::Assistant {
+                content,
+                created_at_ms,
+                thinking,
+                tool_calls,
+            },
+            Message::Tool {
+                tool_call_id,
+                tool_name,
+                result,
+                is_error,
+                created_at_ms,
+            } => Self::Tool {
+                tool_call_id,
+                tool_name,
+                result,
+                is_error,
+                created_at_ms,
+            },
+        }
+    }
+}
+
+impl From<&Message> for RequestMessage {
+    fn from(message: &Message) -> Self {
+        message.clone().into()
+    }
+}
+
+impl TryFrom<RequestMessage> for Message {
+    type Error = AiError;
+
+    fn try_from(message: RequestMessage) -> Result<Self, Self::Error> {
+        match message {
+            RequestMessage::User {
+                content,
+                created_at_ms,
+            } => {
+                if content.iter().any(|part| part.as_image().is_some()) {
+                    return Err(AiError::configuration(
+                        "cannot downgrade user message with input images to text-only Message",
+                    ));
+                }
+                Ok(Message::User {
+                    content: join_text_parts(&content),
+                    created_at_ms,
+                })
+            }
+            RequestMessage::Assistant {
+                content,
+                created_at_ms,
+                thinking,
+                tool_calls,
+            } => Ok(Message::Assistant {
+                content,
+                created_at_ms,
+                thinking,
+                tool_calls,
+            }),
+            RequestMessage::Tool {
+                tool_call_id,
+                tool_name,
+                result,
+                is_error,
+                created_at_ms,
+            } => Ok(Message::Tool {
+                tool_call_id,
+                tool_name,
+                result,
+                is_error,
+                created_at_ms,
+            }),
+        }
+    }
+}
+
+impl TryFrom<&RequestMessage> for Message {
+    type Error = AiError;
+
+    fn try_from(message: &RequestMessage) -> Result<Self, Self::Error> {
+        message.clone().try_into()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultimodalChatRequest {
+    pub model: String,
+    pub messages: Vec<RequestMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDefinition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
+}
+
+impl MultimodalChatRequest {
+    pub fn new(model: impl Into<String>, messages: Vec<RequestMessage>) -> Self {
+        Self {
+            model: model.into(),
+            messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: None,
+            temperature: None,
+            system: None,
+            thinking: None,
+        }
+    }
+
+    pub fn has_input_images(&self) -> bool {
+        self.messages
+            .iter()
+            .any(RequestMessage::contains_input_images)
+    }
+
+    pub fn try_into_chat_request(self) -> Result<ChatRequest, AiError> {
+        Ok(ChatRequest {
+            model: self.model,
+            messages: self
+                .messages
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+            tools: self.tools,
+            tool_choice: self.tool_choice,
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            system: self.system,
+            thinking: self.thinking,
+        })
+    }
+}
+
+impl From<ChatRequest> for MultimodalChatRequest {
+    fn from(request: ChatRequest) -> Self {
+        Self {
+            model: request.model,
+            messages: request.messages.into_iter().map(Into::into).collect(),
+            tools: request.tools,
+            tool_choice: request.tool_choice,
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            system: request.system,
+            thinking: request.thinking,
+        }
+    }
+}
+
+impl From<&ChatRequest> for MultimodalChatRequest {
+    fn from(request: &ChatRequest) -> Self {
+        request.clone().into()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -625,6 +1097,24 @@ fn empty_object() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
+fn join_text_parts(parts: &[ContentPart]) -> String {
+    parts
+        .iter()
+        .filter_map(ContentPart::as_text)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn parse_data_url(url: &str) -> Option<(String, String)> {
+    let encoded = url.strip_prefix("data:")?;
+    let (metadata, data_base64) = encoded.split_once(";base64,")?;
+    let mime_type = metadata.trim();
+    if mime_type.is_empty() || data_base64.is_empty() {
+        return None;
+    }
+    Some((mime_type.to_string(), data_base64.to_string()))
+}
+
 pub(crate) fn parse_tool_arguments(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
@@ -898,6 +1388,41 @@ pub trait AiClient: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError>;
     fn chat_stream(&self, request: ChatRequest)
     -> BoxStream<'static, Result<StreamChunk, AiError>>;
+    async fn chat_multimodal(
+        &self,
+        request: MultimodalChatRequest,
+    ) -> Result<ChatResponse, AiError> {
+        if request.has_input_images() {
+            return Err(unsupported_input_images_error(
+                self.config().provider,
+                "chat_multimodal",
+                self.config().base_url(),
+            ));
+        }
+        self.chat(request.try_into_chat_request()?).await
+    }
+    fn chat_multimodal_stream(
+        &self,
+        request: MultimodalChatRequest,
+    ) -> BoxStream<'static, Result<StreamChunk, AiError>> {
+        if request.has_input_images() {
+            let provider = self.config().provider;
+            let target = self.config().base_url().to_string();
+            return futures_util::stream::once(async move {
+                Err(unsupported_input_images_error(
+                    provider,
+                    "chat_multimodal_stream",
+                    target,
+                ))
+            })
+            .boxed();
+        }
+
+        match request.try_into_chat_request() {
+            Ok(request) => self.chat_stream(request),
+            Err(error) => futures_util::stream::once(async move { Err(error) }).boxed(),
+        }
+    }
     fn config(&self) -> &AiConfig;
     async fn list_models(&self) -> Result<Vec<String>, AiError>;
 }
@@ -1058,6 +1583,30 @@ impl std::fmt::Display for AiError {
 
 impl std::error::Error for AiError {}
 
+pub(crate) fn unsupported_input_images_error(
+    provider: AiProvider,
+    operation: &str,
+    target: impl Into<String>,
+) -> AiError {
+    AiError::configuration("input images are not supported by this provider")
+        .with_provider(provider)
+        .with_operation(operation)
+        .with_target(target)
+}
+
+pub(crate) fn unsupported_image_url_error(
+    provider: AiProvider,
+    operation: &str,
+    target: impl Into<String>,
+) -> AiError {
+    AiError::configuration(
+        "remote image URLs are not supported by this provider; send base64 data instead",
+    )
+    .with_provider(provider)
+    .with_operation(operation)
+    .with_target(target)
+}
+
 impl AiProvider {
     fn spec(&self) -> ProviderSpec {
         match self {
@@ -1181,12 +1730,65 @@ impl AiProvider {
     pub fn supports_tools(&self) -> bool {
         self.spec().supports_tools
     }
+
+    pub fn supports_input_images(&self) -> bool {
+        !matches!(
+            self.spec().api_style,
+            ApiStyle::GitHubCopilot | ApiStyle::OpenAiCodex
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Message;
+    use super::{
+        AiClient, AiConfig, AiError, AiProvider, ChatRequest, ChatResponse, ContentPart,
+        ImageDetail, InputImage, Message, MultimodalChatRequest, RequestMessage, StreamChunk,
+        Usage,
+    };
+    use futures_util::{
+        StreamExt,
+        stream::{self, BoxStream},
+    };
     use serde_json::json;
+
+    struct DummyClient {
+        config: AiConfig,
+    }
+
+    #[async_trait::async_trait]
+    impl AiClient for DummyClient {
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
+            Ok(ChatResponse {
+                id: "dummy".to_string(),
+                content: request.messages[0].content_or_default().to_string(),
+                model: request.model,
+                usage: Usage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+                thinking: None,
+                images: Vec::new(),
+                tool_calls: Vec::new(),
+                debug: None,
+            })
+        }
+
+        fn chat_stream(
+            &self,
+            _request: ChatRequest,
+        ) -> BoxStream<'static, Result<StreamChunk, AiError>> {
+            stream::empty().boxed()
+        }
+
+        fn config(&self) -> &AiConfig {
+            &self.config
+        }
+
+        async fn list_models(&self) -> Result<Vec<String>, AiError> {
+            Ok(vec![self.config.default_model.clone()])
+        }
+    }
 
     #[test]
     fn serializes_tool_messages_with_legacy_wire_fields() {
@@ -1222,5 +1824,74 @@ mod tests {
         assert_eq!(tool_name, "lookup");
         assert_eq!(result, &json!({"ok": true}));
         assert!(is_error);
+    }
+
+    #[test]
+    fn converts_text_only_request_into_multimodal_request() {
+        let request = ChatRequest::new("model", vec![Message::user("hello")]);
+        let multimodal = MultimodalChatRequest::from(request);
+
+        assert_eq!(multimodal.messages.len(), 1);
+        assert!(!multimodal.has_input_images());
+        assert_eq!(
+            multimodal.messages[0]
+                .content_parts()
+                .and_then(|parts| parts[0].as_text()),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn request_message_text_only_downgrades_back_to_message() {
+        let message = RequestMessage::user_parts(vec![
+            ContentPart::text("hello"),
+            ContentPart::text(" world"),
+        ]);
+
+        let downgraded: Message = message.try_into().expect("downgrade to text-only message");
+        assert_eq!(downgraded.as_user(), Some("hello world"));
+    }
+
+    #[test]
+    fn request_message_with_images_cannot_downgrade_to_text_only() {
+        let message = RequestMessage::user_parts(vec![
+            ContentPart::text("hello"),
+            ContentPart::image(
+                InputImage::from_base64("image/png", "aGVsbG8=").with_detail(ImageDetail::Low),
+            ),
+        ]);
+
+        let error = Message::try_from(message).expect_err("image-bearing message should fail");
+        assert_eq!(error.kind, super::AiErrorKind::Configuration);
+    }
+
+    #[tokio::test]
+    async fn unsupported_provider_rejects_multimodal_images_explicitly() {
+        let client = DummyClient {
+            config: AiConfig::new(AiProvider::GitHubCopilot),
+        };
+        let request = MultimodalChatRequest::new(
+            "model",
+            vec![RequestMessage::user_parts(vec![ContentPart::image(
+                InputImage::from_url("https://example.com/cat.png"),
+            )])],
+        );
+
+        let error = client
+            .chat_multimodal(request)
+            .await
+            .expect_err("unsupported provider should reject input images");
+
+        assert_eq!(error.kind, super::AiErrorKind::Configuration);
+        assert_eq!(error.provider, Some(AiProvider::GitHubCopilot));
+    }
+
+    #[test]
+    fn provider_capability_marks_text_only_providers() {
+        assert!(AiProvider::OpenAi.supports_input_images());
+        assert!(AiProvider::Anthropic.supports_input_images());
+        assert!(AiProvider::Gemini.supports_input_images());
+        assert!(!AiProvider::GitHubCopilot.supports_input_images());
+        assert!(!AiProvider::OpenAiCodex.supports_input_images());
     }
 }

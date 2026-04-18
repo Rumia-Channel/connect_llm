@@ -4,8 +4,9 @@ pub mod mcp;
 
 pub use ai::{
     AiAuth, AiClient, AiConfig, AiEndpointConfig, AiError, AiErrorKind, AiHttpConfig, AiProvider,
-    ChatRequest, ChatResponse, DebugTrace, GeneratedImage, GitHubCopilotDeviceAuth,
-    GitHubCopilotDeviceAuthOptions, Message, OpenAiCodexBrowserAuth, OpenAiCodexBrowserAuthOptions,
+    ChatRequest, ChatResponse, ContentPart, DebugTrace, GeneratedImage, GitHubCopilotDeviceAuth,
+    GitHubCopilotDeviceAuthOptions, ImageDetail, ImageSource, InputImage, Message,
+    MultimodalChatRequest, OpenAiCodexBrowserAuth, OpenAiCodexBrowserAuthOptions, RequestMessage,
     StreamChunk, ThinkingConfig, ThinkingDisplay, ThinkingEffort, ThinkingOutput, ToolCall,
     ToolCallDelta, ToolChoice, ToolDefinition, Usage, debug_logging_enabled,
     github_copilot_auth_path, login_github_copilot_via_device, login_openai_codex_via_browser,

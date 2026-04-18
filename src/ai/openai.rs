@@ -8,8 +8,8 @@ use self::protocol::{
     convert_tool_call_deltas,
 };
 use super::{
-    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    capture_debug_json, capture_debug_text,
+    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, MultimodalChatRequest,
+    StreamChunk, capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -26,14 +26,16 @@ impl OpenAiClient {
             config,
         })
     }
-}
 
-#[async_trait::async_trait]
-impl AiClient for OpenAiClient {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
-        let api_key = self.config.require_bearer_token("chat")?;
+    async fn chat_impl(
+        &self,
+        request: MultimodalChatRequest,
+        operation: &'static str,
+    ) -> Result<ChatResponse, AiError> {
+        let api_key = self.config.require_bearer_token(operation)?;
         let url = convert::chat_completions_url(self.config.base_url());
-        let openai_request = convert::convert_request(request, self.config.base_url(), false);
+        let openai_request =
+            convert::convert_multimodal_request(request, self.config.base_url(), false)?;
         let request_debug =
             capture_debug_json(&format!("openai request POST {}", url), &openai_request);
 
@@ -75,15 +77,20 @@ impl AiClient for OpenAiClient {
         ))
     }
 
-    fn chat_stream(
+    fn chat_stream_impl(
         &self,
-        request: ChatRequest,
+        request: MultimodalChatRequest,
+        operation: &'static str,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
         let url = convert::chat_completions_url(self.config.base_url());
-        let openai_request = convert::convert_request(request, self.config.base_url(), true);
+        let openai_request =
+            match convert::convert_multimodal_request(request, self.config.base_url(), true) {
+                Ok(request) => request,
+                Err(error) => return futures_util::stream::once(async move { Err(error) }).boxed(),
+            };
         let api_key = self
             .config
-            .require_bearer_token("chat_stream")
+            .require_bearer_token(operation)
             .map(str::to_string);
         let base_url = self.config.base_url().to_string();
         let client = self.client.clone();
@@ -214,6 +221,21 @@ impl AiClient for OpenAiClient {
                         let tool_call_deltas =
                             convert_tool_call_deltas(choice.delta.tool_calls.clone());
                         let done = choice.finish_reason.is_some();
+                        let mut delta = delta;
+                        let mut thinking_delta = thinking_delta;
+
+                        if done {
+                            let (tail_delta, tail_thinking) = thought_state.clone().finish();
+                            if !tail_delta.is_empty() {
+                                delta.push_str(&tail_delta);
+                            }
+                            if let Some(tail_thinking) = tail_thinking {
+                                match thinking_delta.as_mut() {
+                                    Some(existing) => existing.push_str(&tail_thinking),
+                                    None => thinking_delta = Some(tail_thinking),
+                                }
+                            }
+                        }
 
                         yield Ok(StreamChunk {
                             delta,
@@ -233,18 +255,6 @@ impl AiClient for OpenAiClient {
                         });
 
                         if done {
-                            let (tail_delta, tail_thinking) = thought_state.clone().finish();
-                            if !tail_delta.is_empty() || tail_thinking.is_some() {
-                                yield Ok(StreamChunk {
-                                    delta: tail_delta,
-                                    thinking_delta: tail_thinking,
-                                    thinking_signature: None,
-                                    images: Vec::new(),
-                                    tool_call_deltas: Vec::new(),
-                                    done: false,
-                                    debug: None,
-                                });
-                            }
                             return;
                         }
                     }
@@ -266,6 +276,34 @@ impl AiClient for OpenAiClient {
         };
 
         stream.boxed()
+    }
+}
+
+#[async_trait::async_trait]
+impl AiClient for OpenAiClient {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
+        self.chat_impl(request.into(), "chat").await
+    }
+
+    async fn chat_multimodal(
+        &self,
+        request: MultimodalChatRequest,
+    ) -> Result<ChatResponse, AiError> {
+        self.chat_impl(request, "chat_multimodal").await
+    }
+
+    fn chat_stream(
+        &self,
+        request: ChatRequest,
+    ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
+        self.chat_stream_impl(request.into(), "chat_stream")
+    }
+
+    fn chat_multimodal_stream(
+        &self,
+        request: MultimodalChatRequest,
+    ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
+        self.chat_stream_impl(request, "chat_multimodal_stream")
     }
 
     fn config(&self) -> &AiConfig {
@@ -326,12 +364,13 @@ mod tests {
     use super::{
         convert,
         protocol::{
-            OpenAiChoice, OpenAiMessageResponse, OpenAiResponse, OpenAiToolCall,
-            OpenAiToolFunction, OpenAiUsage,
+            OpenAiChoice, OpenAiMessageContent, OpenAiMessageResponse, OpenAiResponse,
+            OpenAiToolCall, OpenAiToolFunction, OpenAiUsage,
         },
     };
     use crate::ai::{
-        AiAuth, AiConfig, AiProvider, ChatRequest, Message, ToolCall, ToolChoice, ToolDefinition,
+        AiAuth, AiConfig, AiProvider, ChatRequest, ContentPart, ImageDetail, InputImage, Message,
+        MultimodalChatRequest, RequestMessage, ToolCall, ToolChoice, ToolDefinition,
     };
     use reqwest::Client;
     use serde_json::json;
@@ -374,8 +413,10 @@ mod tests {
             Some("call_1")
         );
         assert_eq!(
-            converted.messages[1].content.as_deref(),
-            Some("{\"temperature_c\":22}")
+            converted.messages[1].content,
+            Some(OpenAiMessageContent::Text(
+                "{\"temperature_c\":22}".to_string()
+            ))
         );
         assert!(converted.messages[1].tool_calls.is_none());
     }
@@ -441,5 +482,69 @@ mod tests {
             .with_http_client(injected.clone());
         let client = OpenAiClient::new(config).expect("client");
         let _ = client;
+    }
+
+    #[test]
+    fn convert_multimodal_request_uses_typed_content_parts() {
+        let request = MultimodalChatRequest::new(
+            "gpt-5.4",
+            vec![RequestMessage::User {
+                content: vec![
+                    ContentPart::text("describe this"),
+                    ContentPart::image(
+                        InputImage::from_base64("image/png", "aGVsbG8=")
+                            .with_detail(ImageDetail::High),
+                    ),
+                ],
+                created_at_ms: None,
+            }],
+        );
+
+        let converted =
+            convert::convert_multimodal_request(request, "https://api.openai.com", false)
+                .expect("convert multimodal request");
+
+        match converted.messages[0].content.as_ref() {
+            Some(OpenAiMessageContent::Parts(parts)) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0].part_type, "text");
+                assert_eq!(parts[0].text.as_deref(), Some("describe this"));
+                assert_eq!(parts[1].part_type, "image_url");
+                assert_eq!(
+                    parts[1].image_url.as_ref().map(|image| image.url.as_str()),
+                    Some("data:image/png;base64,aGVsbG8=")
+                );
+                assert_eq!(
+                    parts[1]
+                        .image_url
+                        .as_ref()
+                        .and_then(|image| image.detail.as_deref()),
+                    Some("high")
+                );
+            }
+            other => panic!("expected content parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_multimodal_request_keeps_remote_urls_for_openai_compatible_endpoints() {
+        let request = MultimodalChatRequest::new(
+            "gpt-5.4",
+            vec![RequestMessage::user_parts(vec![ContentPart::image(
+                InputImage::from_url("https://example.com/cat.png"),
+            )])],
+        );
+
+        let converted =
+            convert::convert_multimodal_request(request, "https://api.openai.com", false)
+                .expect("convert multimodal request");
+
+        match converted.messages[0].content.as_ref() {
+            Some(OpenAiMessageContent::Parts(parts)) => assert_eq!(
+                parts[0].image_url.as_ref().map(|image| image.url.as_str()),
+                Some("https://example.com/cat.png")
+            ),
+            other => panic!("expected image content parts, got {other:?}"),
+        }
     }
 }

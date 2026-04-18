@@ -40,6 +40,8 @@ pub(super) struct AnthropicRequestContentBlock {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<AnthropicImageSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -51,6 +53,18 @@ pub(super) struct AnthropicRequestContentBlock {
     pub content: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    pub source_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

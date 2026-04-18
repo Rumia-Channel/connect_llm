@@ -6,8 +6,8 @@ mod streaming;
 
 use self::protocol::{AnthropicResponse, api_error_from_response};
 use super::{
-    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, StreamChunk,
-    capture_debug_json, capture_debug_text,
+    AiClient, AiConfig, AiError, ChatRequest, ChatResponse, DebugTrace, MultimodalChatRequest,
+    StreamChunk, capture_debug_json, capture_debug_text,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -90,15 +90,42 @@ impl AnthropicClient {
 
         request
     }
-}
 
-#[async_trait::async_trait]
-impl AiClient for AnthropicClient {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
-        let api_key = self.config.require_api_key("chat")?;
-        let request = self.resolve_request_defaults(request);
+    fn resolve_multimodal_request_defaults(
+        &self,
+        mut request: MultimodalChatRequest,
+    ) -> MultimodalChatRequest {
+        if request.max_tokens.is_none() {
+            request.max_tokens = Some(self.default_max_tokens(&request.model));
+        }
+
+        let default_thinking_budget = request.thinking.as_ref().and_then(|thinking| {
+            if !thinking.enabled || thinking.budget_tokens.is_some() || !self.is_kimi_coding() {
+                return None;
+            }
+            let max_tokens = request
+                .max_tokens
+                .unwrap_or_else(|| self.default_max_tokens(&request.model));
+            Some((max_tokens / 2).saturating_sub(1).min(16_000))
+        });
+        if let (Some(thinking), Some(budget_tokens)) =
+            (&mut request.thinking, default_thinking_budget)
+        {
+            thinking.budget_tokens = Some(budget_tokens);
+        }
+
+        request
+    }
+
+    async fn chat_impl(
+        &self,
+        request: MultimodalChatRequest,
+        operation: &'static str,
+    ) -> Result<ChatResponse, AiError> {
+        let api_key = self.config.require_api_key(operation)?;
+        let request = self.resolve_multimodal_request_defaults(request);
         let url = format!("{}/v1/messages", self.config.base_url());
-        let anthropic_request = convert::convert_request(request);
+        let anthropic_request = convert::convert_multimodal_request(request)?;
         let request_debug = capture_debug_json(
             &format!("anthropic request POST {}", url),
             &anthropic_request,
@@ -144,18 +171,19 @@ impl AiClient for AnthropicClient {
         ))
     }
 
-    fn chat_stream(
+    fn chat_stream_impl(
         &self,
-        request: ChatRequest,
+        request: MultimodalChatRequest,
+        operation: &'static str,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
-        let request = self.resolve_request_defaults(request);
+        let request = self.resolve_multimodal_request_defaults(request);
         let url = format!("{}/v1/messages", self.config.base_url());
-        let mut anthropic_request = convert::convert_request(request);
+        let mut anthropic_request = match convert::convert_multimodal_request(request) {
+            Ok(request) => request,
+            Err(error) => return futures_util::stream::once(async move { Err(error) }).boxed(),
+        };
         anthropic_request.stream = Some(true);
-        let api_key = self
-            .config
-            .require_api_key("chat_stream")
-            .map(str::to_string);
+        let api_key = self.config.require_api_key(operation).map(str::to_string);
         let anthropic_beta_header = self.anthropic_beta_header().map(str::to_string);
         let request_debug = capture_debug_json(
             &format!("anthropic stream request POST {}", url),
@@ -263,6 +291,35 @@ impl AiClient for AnthropicClient {
 
         stream.boxed()
     }
+}
+
+#[async_trait::async_trait]
+impl AiClient for AnthropicClient {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
+        self.chat_impl(self.resolve_request_defaults(request).into(), "chat")
+            .await
+    }
+
+    async fn chat_multimodal(
+        &self,
+        request: MultimodalChatRequest,
+    ) -> Result<ChatResponse, AiError> {
+        self.chat_impl(request, "chat_multimodal").await
+    }
+
+    fn chat_stream(
+        &self,
+        request: ChatRequest,
+    ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
+        self.chat_stream_impl(self.resolve_request_defaults(request).into(), "chat_stream")
+    }
+
+    fn chat_multimodal_stream(
+        &self,
+        request: MultimodalChatRequest,
+    ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
+        self.chat_stream_impl(request, "chat_multimodal_stream")
+    }
 
     fn config(&self) -> &AiConfig {
         &self.config
@@ -320,7 +377,8 @@ impl AiClient for AnthropicClient {
 mod tests {
     use super::{AnthropicClient, convert};
     use crate::ai::{
-        AiAuth, AiConfig, AiProvider, ChatRequest, Message, ThinkingConfig, ToolCall, ToolChoice,
+        AiAuth, AiConfig, AiProvider, ChatRequest, ContentPart, InputImage, Message,
+        MultimodalChatRequest, RequestMessage, ThinkingConfig, ToolCall, ToolChoice,
         ToolDefinition,
     };
     use serde_json::json;
@@ -401,5 +459,63 @@ mod tests {
                 .and_then(|thinking| thinking.budget_tokens),
             Some(16_000)
         );
+    }
+
+    #[test]
+    fn convert_multimodal_request_encodes_base64_images() {
+        let request = MultimodalChatRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![RequestMessage::user_parts(vec![
+                ContentPart::text("describe"),
+                ContentPart::image(InputImage::from_base64("image/png", "aGVsbG8=")),
+            ])],
+        );
+
+        let converted = convert::convert_multimodal_request(request).expect("convert request");
+        assert_eq!(converted.messages[0].content.len(), 2);
+        assert_eq!(converted.messages[0].content[0].content_type, "text");
+        assert_eq!(converted.messages[0].content[1].content_type, "image");
+        assert_eq!(
+            converted.messages[0].content[1]
+                .source
+                .as_ref()
+                .and_then(|source| source.media_type.as_deref()),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn convert_multimodal_request_supports_remote_image_urls() {
+        let request = MultimodalChatRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![RequestMessage::user_parts(vec![ContentPart::image(
+                InputImage::from_url("https://example.com/cat.png"),
+            )])],
+        );
+
+        let converted = convert::convert_multimodal_request(request).expect("convert request");
+        assert_eq!(converted.messages[0].content[0].content_type, "image");
+        assert_eq!(
+            converted.messages[0].content[0]
+                .source
+                .as_ref()
+                .and_then(|source| source.url.as_deref()),
+            Some("https://example.com/cat.png")
+        );
+    }
+
+    #[test]
+    fn convert_multimodal_request_rejects_unsupported_anthropic_image_types() {
+        let request = MultimodalChatRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![RequestMessage::user_parts(vec![ContentPart::image(
+                InputImage::from_base64("image/bmp", "aGVsbG8="),
+            )])],
+        );
+
+        let error = convert::convert_multimodal_request(request)
+            .expect_err("unsupported media types should fail");
+        assert_eq!(error.kind, crate::ai::AiErrorKind::Configuration);
+        assert_eq!(error.provider, Some(AiProvider::Anthropic));
     }
 }

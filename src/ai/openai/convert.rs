@@ -1,11 +1,13 @@
 use super::protocol::{
-    OpenAiExtraBody, OpenAiFunctionDefinition, OpenAiGoogleExtraBody, OpenAiGoogleThinkingConfig,
-    OpenAiMessage, OpenAiRequest, OpenAiResponse, OpenAiThinkingRequest, OpenAiToolCall,
-    OpenAiToolDefinition, OpenAiToolFunction, convert_tool_calls_to_response,
+    OpenAiContentPart, OpenAiExtraBody, OpenAiFunctionDefinition, OpenAiGoogleExtraBody,
+    OpenAiGoogleThinkingConfig, OpenAiImageUrlPart, OpenAiMessage, OpenAiMessageContent,
+    OpenAiRequest, OpenAiResponse, OpenAiThinkingRequest, OpenAiToolCall, OpenAiToolDefinition,
+    OpenAiToolFunction, convert_tool_calls_to_response,
 };
 use crate::ai::{
-    ChatRequest, ChatResponse, DebugTrace, Message, ThinkingConfig, ThinkingOutput, ToolCall,
-    ToolChoice, ToolDefinition, Usage, providers, serialize_tool_arguments,
+    ChatRequest, ChatResponse, ContentPart, DebugTrace, ImageDetail, ImageSource,
+    MultimodalChatRequest, RequestMessage, ThinkingConfig, ThinkingOutput, ToolCall, ToolChoice,
+    ToolDefinition, Usage, providers, serialize_tool_arguments,
 };
 use serde_json::{Value, json};
 
@@ -263,7 +265,68 @@ fn convert_tool_calls(tool_calls: Vec<ToolCall>) -> Option<Vec<OpenAiToolCall>> 
 }
 
 pub(super) fn convert_request(request: ChatRequest, base_url: &str, stream: bool) -> OpenAiRequest {
-    let ChatRequest {
+    convert_multimodal_request(request.into(), base_url, stream)
+        .expect("text-only ChatRequest conversion must not fail")
+}
+
+fn convert_image_detail(detail: Option<ImageDetail>) -> Option<String> {
+    match detail {
+        Some(ImageDetail::Auto) => Some("auto".to_string()),
+        Some(ImageDetail::Low) => Some("low".to_string()),
+        Some(ImageDetail::High) => Some("high".to_string()),
+        None => None,
+    }
+}
+
+fn convert_user_content_parts(parts: Vec<ContentPart>) -> OpenAiMessageContent {
+    if parts
+        .iter()
+        .all(|part| matches!(part, ContentPart::Text { .. }))
+    {
+        return OpenAiMessageContent::Text(
+            parts
+                .iter()
+                .filter_map(ContentPart::as_text)
+                .collect::<Vec<_>>()
+                .join(""),
+        );
+    }
+
+    OpenAiMessageContent::Parts(
+        parts
+            .into_iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => OpenAiContentPart {
+                    part_type: "text",
+                    text: Some(text),
+                    image_url: None,
+                },
+                ContentPart::Image { image } => {
+                    let detail = convert_image_detail(image.detail);
+                    let url = match image.source {
+                        ImageSource::Base64 {
+                            mime_type,
+                            data_base64,
+                        } => format!("data:{};base64,{}", mime_type, data_base64),
+                        ImageSource::Url { url } => url,
+                    };
+                    OpenAiContentPart {
+                        part_type: "image_url",
+                        text: None,
+                        image_url: Some(OpenAiImageUrlPart { url, detail }),
+                    }
+                }
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn convert_multimodal_request(
+    request: MultimodalChatRequest,
+    base_url: &str,
+    stream: bool,
+) -> Result<OpenAiRequest, crate::ai::AiError> {
+    let MultimodalChatRequest {
         model,
         messages: request_messages,
         tools,
@@ -282,7 +345,7 @@ pub(super) fn convert_request(request: ChatRequest, base_url: &str, stream: bool
     if let Some(system) = system {
         messages.push(OpenAiMessage {
             role: "system".to_string(),
-            content: Some(system),
+            content: Some(OpenAiMessageContent::Text(system)),
             reasoning_content: None,
             tool_call_id: None,
             tool_calls: None,
@@ -291,38 +354,37 @@ pub(super) fn convert_request(request: ChatRequest, base_url: &str, stream: bool
 
     for message in request_messages {
         match message {
-            Message::Tool {
+            RequestMessage::Tool {
                 tool_call_id,
                 result,
                 ..
             } => messages.push(OpenAiMessage {
                 role: "tool".to_string(),
-                content: Some(serialize_tool_arguments(&result)),
+                content: Some(OpenAiMessageContent::Text(serialize_tool_arguments(
+                    &result,
+                ))),
                 reasoning_content: None,
                 tool_call_id: Some(tool_call_id),
                 tool_calls: None,
             }),
-            Message::User {
-                content,
-                created_at_ms: _,
-            } => messages.push(OpenAiMessage {
+            RequestMessage::User { content, .. } => messages.push(OpenAiMessage {
                 role: "user".to_string(),
-                content: Some(content),
+                content: Some(convert_user_content_parts(content)),
                 reasoning_content: None,
                 tool_call_id: None,
                 tool_calls: None,
             }),
-            Message::Assistant {
+            RequestMessage::Assistant {
                 content,
-                created_at_ms: _,
                 thinking,
                 tool_calls,
+                ..
             } => {
                 let reasoning_content = thinking.and_then(|thinking| thinking.text);
                 let content = if content.is_empty() && !tool_calls.is_empty() {
                     None
                 } else {
-                    Some(content)
+                    Some(OpenAiMessageContent::Text(content))
                 };
                 messages.push(OpenAiMessage {
                     role: "assistant".to_string(),
@@ -335,7 +397,7 @@ pub(super) fn convert_request(request: ChatRequest, base_url: &str, stream: bool
         }
     }
 
-    OpenAiRequest {
+    Ok(OpenAiRequest {
         model,
         messages,
         tools: convert_tools(&tools),
@@ -345,7 +407,7 @@ pub(super) fn convert_request(request: ChatRequest, base_url: &str, stream: bool
         thinking: convert_thinking_config(base_url, thinking.as_ref()),
         extra_body: convert_google_extra_body(base_url, thinking.as_ref()),
         stream,
-    }
+    })
 }
 
 pub(super) fn convert_response(

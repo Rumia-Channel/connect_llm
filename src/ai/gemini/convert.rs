@@ -5,8 +5,9 @@ use super::protocol::{
     GeminiUsageMetadata,
 };
 use crate::ai::{
-    ChatRequest, ChatResponse, DebugTrace, GeneratedImage, Message, ThinkingOutput, ToolCall,
-    ToolChoice, ToolDefinition, Usage,
+    ChatRequest, ChatResponse, ContentPart, DebugTrace, GeneratedImage, MultimodalChatRequest,
+    RequestMessage, ThinkingOutput, ToolCall, ToolChoice, ToolDefinition, Usage,
+    unsupported_image_url_error,
 };
 use serde_json::{Map, Value};
 
@@ -75,14 +76,32 @@ fn tool_result_object(value: Value) -> Value {
     }
 }
 
-fn convert_message(message: Message) -> GeminiContent {
+fn text_part(text: String) -> GeminiPart {
+    GeminiPart {
+        text: Some(text),
+        inline_data: None,
+        thought: None,
+        thought_signature: None,
+        function_call: None,
+        function_response: None,
+    }
+}
+
+fn convert_message(message: crate::ai::Message) -> GeminiContent {
+    convert_multimodal_message(message.into())
+        .expect("text-only ChatRequest conversion must not fail")
+}
+
+fn convert_multimodal_message(
+    message: RequestMessage,
+) -> Result<GeminiContent, crate::ai::AiError> {
     match message {
-        Message::Tool {
+        RequestMessage::Tool {
             tool_call_id,
             tool_name,
             result,
             ..
-        } => GeminiContent {
+        } => Ok(GeminiContent {
             role: Some(convert_role("tool")),
             parts: vec![GeminiPart {
                 text: None,
@@ -102,26 +121,45 @@ fn convert_message(message: Message) -> GeminiContent {
                     }),
                 }),
             }],
-        },
-        Message::User {
+        }),
+        RequestMessage::User { content, .. } => {
+            let mut parts = Vec::new();
+            for part in content {
+                match part {
+                    ContentPart::Text { text } => parts.push(text_part(text)),
+                    ContentPart::Image { image } => {
+                        if let Some((mime_type, data_base64)) = image.as_inline_base64() {
+                            parts.push(GeminiPart {
+                                text: None,
+                                inline_data: Some(super::protocol::GeminiInlineData {
+                                    mime_type: Some(mime_type),
+                                    data: data_base64,
+                                }),
+                                thought: None,
+                                thought_signature: None,
+                                function_call: None,
+                                function_response: None,
+                            });
+                        } else {
+                            return Err(unsupported_image_url_error(
+                                crate::ai::AiProvider::Gemini,
+                                "chat_multimodal",
+                                "generateContent",
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(GeminiContent {
+                role: Some(convert_role("user")),
+                parts,
+            })
+        }
+        RequestMessage::Assistant {
             content,
-            created_at_ms: _,
-        } => GeminiContent {
-            role: Some(convert_role("user")),
-            parts: vec![GeminiPart {
-                text: Some(content),
-                inline_data: None,
-                thought: None,
-                thought_signature: None,
-                function_call: None,
-                function_response: None,
-            }],
-        },
-        Message::Assistant {
-            content,
-            created_at_ms: _,
             thinking,
             tool_calls,
+            ..
         } => {
             let mut parts = Vec::new();
 
@@ -155,19 +193,15 @@ fn convert_message(message: Message) -> GeminiContent {
             let thought_signature = thinking.and_then(|thinking| thinking.signature);
             if !content.is_empty() || parts.is_empty() {
                 parts.push(GeminiPart {
-                    text: Some(content),
-                    inline_data: None,
-                    thought: None,
                     thought_signature,
-                    function_call: None,
-                    function_response: None,
+                    ..text_part(content)
                 });
             }
 
-            GeminiContent {
+            Ok(GeminiContent {
                 role: Some(convert_role("assistant")),
                 parts,
-            }
+            })
         }
     }
 }
@@ -187,7 +221,14 @@ fn convert_system_instruction(system: String) -> GeminiContent {
 }
 
 pub(super) fn convert_request(request: ChatRequest) -> GeminiRequest {
-    let ChatRequest {
+    convert_multimodal_request(request.into())
+        .expect("text-only ChatRequest conversion must not fail")
+}
+
+pub(super) fn convert_multimodal_request(
+    request: MultimodalChatRequest,
+) -> Result<GeminiRequest, crate::ai::AiError> {
+    let MultimodalChatRequest {
         model: _,
         messages,
         tools,
@@ -198,8 +239,11 @@ pub(super) fn convert_request(request: ChatRequest) -> GeminiRequest {
         thinking,
     } = request;
 
-    GeminiRequest {
-        contents: messages.into_iter().map(convert_message).collect(),
+    Ok(GeminiRequest {
+        contents: messages
+            .into_iter()
+            .map(convert_multimodal_message)
+            .collect::<Result<Vec<_>, _>>()?,
         system_instruction: system.map(convert_system_instruction),
         tools: convert_tools(&tools),
         tool_config: convert_tool_config(tool_choice.as_ref()),
@@ -217,7 +261,7 @@ pub(super) fn convert_request(request: ChatRequest) -> GeminiRequest {
                 })
             }),
         }),
-    }
+    })
 }
 
 pub(super) fn parse_candidate(
@@ -326,9 +370,12 @@ pub(super) fn convert_response(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_candidate;
+    use super::{convert_multimodal_request, parse_candidate};
     use crate::ai::gemini::protocol::{
         GeminiCandidate, GeminiContent, GeminiInlineData, GeminiPart,
+    };
+    use crate::ai::{
+        AiErrorKind, AiProvider, ContentPart, InputImage, MultimodalChatRequest, RequestMessage,
     };
 
     #[test]
@@ -358,5 +405,40 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].mime_type.as_deref(), Some("image/png"));
         assert_eq!(images[0].data_base64.as_deref(), Some("aGVsbG8="));
+    }
+
+    #[test]
+    fn convert_multimodal_request_encodes_inline_images() {
+        let request = MultimodalChatRequest::new(
+            "gemini-2.5-flash",
+            vec![RequestMessage::user_parts(vec![
+                ContentPart::text("describe"),
+                ContentPart::image(InputImage::from_base64("image/png", "aGVsbG8=")),
+            ])],
+        );
+
+        let converted = convert_multimodal_request(request).expect("convert request");
+        assert_eq!(converted.contents[0].parts.len(), 2);
+        assert_eq!(
+            converted.contents[0].parts[1]
+                .inline_data
+                .as_ref()
+                .and_then(|data| data.mime_type.as_deref()),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn convert_multimodal_request_rejects_remote_image_urls() {
+        let request = MultimodalChatRequest::new(
+            "gemini-2.5-flash",
+            vec![RequestMessage::user_parts(vec![ContentPart::image(
+                InputImage::from_url("https://example.com/cat.png"),
+            )])],
+        );
+
+        let error = convert_multimodal_request(request).expect_err("url images should fail");
+        assert_eq!(error.kind, AiErrorKind::Configuration);
+        assert_eq!(error.provider, Some(AiProvider::Gemini));
     }
 }
