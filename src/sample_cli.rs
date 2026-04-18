@@ -303,6 +303,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     client.as_ref(),
                     request,
                     thinking_enabled,
+                    debug_enabled,
                 )
                 .await
                 .map(|managed| {
@@ -361,7 +362,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     print_tool_calls(&response.tool_calls);
                     if let Some(tool_executions) = &tool_executions {
-                        print_mcp_tool_executions(tool_executions);
+                        print_mcp_tool_executions(tool_executions, debug_enabled);
                     }
                     if let Some(compaction) = &compaction {
                         println!("context manager> {}", describe_compaction(compaction));
@@ -376,9 +377,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         println!("image output error> {}", error);
                     }
                     print_tool_calls(&response.tool_calls);
-                    if let Some(tool_executions) = &tool_executions {
-                        print_mcp_tool_executions(tool_executions);
-                    }
                     if let Some(compaction) = &compaction {
                         println!("context manager> {}", describe_compaction(compaction));
                     }

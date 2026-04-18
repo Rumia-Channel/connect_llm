@@ -43,27 +43,31 @@ pub(crate) fn print_tool_calls(tool_calls: &[ToolCall]) {
     }
 }
 
-pub(crate) fn print_mcp_tool_executions(tool_executions: &[McpToolExecution]) {
+pub(crate) fn print_mcp_tool_executions(tool_executions: &[McpToolExecution], debug_enabled: bool) {
     if tool_executions.is_empty() {
         return;
     }
 
     for execution in tool_executions {
-        let status = if execution.is_error { " error" } else { "" };
-        println!(
-            "tools> {} {} [{} -> {}.{}{}]",
-            execution.tool_name,
-            execution.arguments,
-            execution.tool_call_id,
-            execution.server_label,
-            execution.remote_tool_name,
-            status
-        );
-        println!(
-            "tool result> {}",
-            summarize_json_value(&execution.result, 320)
-        );
+        print_mcp_tool_execution(execution, debug_enabled);
     }
+}
+
+pub(crate) fn print_mcp_tool_execution(execution: &McpToolExecution, _debug_enabled: bool) {
+    let status = if execution.is_error { " error" } else { "" };
+    println!(
+        "tools> {} {} [{} -> {}.{}{}]",
+        execution.tool_name,
+        execution.arguments,
+        execution.tool_call_id,
+        execution.server_label,
+        execution.remote_tool_name,
+        status
+    );
+    println!(
+        "tool result> {}",
+        summarize_json_value(&execution.result, 320)
+    );
 }
 
 fn summarize_json_value(value: &serde_json::Value, max_chars: usize) -> String {
