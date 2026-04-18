@@ -84,7 +84,7 @@ impl ContextManager {
     }
 
     pub fn model_limits(&self, client: &dyn AiClient, request: &ChatRequest) -> ModelContextLimits {
-        resolve_model_context_limits(&client.config().base_url, &request.model)
+        resolve_model_context_limits(&client.config().base_url(), &request.model)
     }
 
     pub fn estimate_request_tokens(&self, request: &ChatRequest) -> usize {
@@ -180,7 +180,7 @@ impl ContextManager {
         let _ = client;
         let _ = request;
         stream::once(async {
-            Err(AiError::Api(
+            Err(AiError::api(
                 "ContextManager::chat_stream is not supported directly. Call prepare_stream_request() and then stream with the prepared request.".to_string(),
             ))
         })
@@ -354,8 +354,8 @@ impl ContextManager {
 
         let mut boundary = None;
         for index in 1..messages.len() {
-            let previous = messages[index - 1].created_at_ms?;
-            let current = messages[index].created_at_ms?;
+            let previous = messages[index - 1].created_at_ms()?;
+            let current = messages[index].created_at_ms()?;
             if current.saturating_sub(previous) >= session_gap_ms {
                 boundary = Some(index);
             }
@@ -367,7 +367,7 @@ impl ContextManager {
     fn latest_message_timestamp_ms(&self, messages: &[Message]) -> Option<u64> {
         messages
             .iter()
-            .filter_map(|message| message.created_at_ms)
+            .filter_map(|message| message.created_at_ms())
             .max()
     }
 
@@ -379,7 +379,7 @@ impl ContextManager {
         let Some(latest_timestamp_ms) = latest_timestamp_ms else {
             return false;
         };
-        let Some(created_at_ms) = message.created_at_ms else {
+        let Some(created_at_ms) = message.created_at_ms() else {
             return false;
         };
         let Some(stale_age_ms) = duration_to_millis(self.config.stale_message_age) else {
@@ -431,7 +431,7 @@ impl ContextManager {
 
         while !required_tool_calls.is_empty() && adjusted > 0 {
             adjusted -= 1;
-            for tool_call in &messages[adjusted].tool_calls {
+            for tool_call in messages[adjusted].tool_calls() {
                 available_tool_calls.insert(tool_call.id.clone());
                 required_tool_calls.remove(&tool_call.id);
             }
@@ -498,11 +498,11 @@ impl ContextManager {
     ) -> Option<Vec<usize>> {
         for index in 0..recent_start.min(messages.len()) {
             let message = &messages[index];
-            if message.role == "tool"
+            if message.role() == "tool"
                 && self.message_needs_microcompact(message, latest_timestamp_ms)
             {
                 let mut batch = Vec::with_capacity(2);
-                if let Some(tool_call_id) = message.tool_call_id.as_deref() {
+                if let Some(tool_call_id) = message.tool_call_id() {
                     if let Some(tool_call_index) =
                         find_tool_call_message_index(messages, tool_call_id, index)
                     {
@@ -528,26 +528,28 @@ impl ContextManager {
         message: &Message,
         latest_timestamp_ms: Option<u64>,
     ) -> bool {
-        if message.thinking.is_some() {
+        if message.thinking().is_some() {
             return true;
         }
 
         if self.is_stale_for_microcompact(message, latest_timestamp_ms)
-            && compact_text_for_request(&message.content, self.config.stale_text_excerpt_chars)
-                != message.content
+            && compact_text_for_request(
+                &message.content_or_default(),
+                self.config.stale_text_excerpt_chars,
+            ) != message.content_or_default()
         {
             return true;
         }
 
-        if let Some(tool_result) = &message.tool_result {
+        if let Some(tool_result) = &message.tool_result_value() {
             if compact_value_for_request(tool_result, self.config.max_message_excerpt_chars / 2)
-                != *tool_result
+                != **tool_result
             {
                 return true;
             }
         }
 
-        message.tool_calls.iter().any(|tool_call| {
+        message.tool_calls().iter().any(|tool_call| {
             compact_value_for_request(
                 &tool_call.arguments,
                 self.config.max_message_excerpt_chars / 2,
@@ -564,35 +566,43 @@ impl ContextManager {
         let mut changed = false;
 
         if self.is_stale_for_microcompact(message, latest_timestamp_ms) {
-            let compacted_content =
-                compact_text_for_request(&compacted.content, self.config.stale_text_excerpt_chars);
-            if compacted_content != compacted.content {
-                compacted.content = compacted_content;
+            let compacted_content = compact_text_for_request(
+                compacted.content_or_default(),
+                self.config.stale_text_excerpt_chars,
+            );
+            if compacted_content != compacted.content_or_default() {
+                if let Some(content) = compacted.content_mut() {
+                    *content = compacted_content;
+                    changed = true;
+                }
+            }
+        }
+
+        if let Some(thinking) = compacted.thinking_mut() {
+            if thinking.take().is_some() {
                 changed = true;
             }
         }
 
-        if compacted.thinking.take().is_some() {
-            changed = true;
-        }
-
-        if let Some(tool_result) = &compacted.tool_result {
+        if let Some(tool_result) = compacted.tool_result_value_mut() {
             let compacted_value =
                 compact_value_for_request(tool_result, self.config.max_message_excerpt_chars / 2);
             if compacted_value != *tool_result {
-                compacted.tool_result = Some(compacted_value);
+                *tool_result = compacted_value;
                 changed = true;
             }
         }
 
-        for tool_call in &mut compacted.tool_calls {
-            let compacted_arguments = compact_value_for_request(
-                &tool_call.arguments,
-                self.config.max_message_excerpt_chars / 2,
-            );
-            if compacted_arguments != tool_call.arguments {
-                tool_call.arguments = compacted_arguments;
-                changed = true;
+        if let Some(tool_calls) = compacted.tool_calls_mut() {
+            for tool_call in tool_calls {
+                let compacted_arguments = compact_value_for_request(
+                    &tool_call.arguments,
+                    self.config.max_message_excerpt_chars / 2,
+                );
+                if compacted_arguments != tool_call.arguments {
+                    tool_call.arguments = compacted_arguments;
+                    changed = true;
+                }
             }
         }
 
@@ -742,17 +752,17 @@ impl ContextManager {
     }
 
     fn render_message_for_summary(&self, message: &Message) -> String {
-        let mut lines = vec![format!("[{}]", message.role)];
+        let mut lines = vec![format!("[{}]", message.role())];
 
-        if !message.content.is_empty() {
+        if !message.content_or_default().is_empty() {
             lines.push(truncate_chars(
-                &message.content,
+                &message.content_or_default(),
                 self.config.max_message_excerpt_chars,
             ));
         }
 
-        if !message.tool_calls.is_empty() {
-            for tool_call in &message.tool_calls {
+        if !message.tool_calls().is_empty() {
+            for tool_call in message.tool_calls() {
                 lines.push(format!(
                     "tool call {} {} {}",
                     tool_call.id,
@@ -765,7 +775,9 @@ impl ContextManager {
             }
         }
 
-        if let (Some(tool_name), Some(tool_result)) = (&message.tool_name, &message.tool_result) {
+        if let (Some(tool_name), Some(tool_result)) =
+            (&message.tool_name(), &message.tool_result_value())
+        {
             lines.push(format!(
                 "tool result {} {}",
                 tool_name,
@@ -781,8 +793,9 @@ impl ContextManager {
     }
 
     fn estimate_message_chars(&self, message: &Message) -> usize {
-        let mut chars = message.role.chars().count() + message.content.chars().count();
-        if let Some(thinking) = &message.thinking {
+        let mut chars =
+            message.role().chars().count() + message.content_or_default().chars().count();
+        if let Some(thinking) = &message.thinking() {
             chars += thinking
                 .text
                 .as_deref()
@@ -802,16 +815,16 @@ impl ContextManager {
                 .map(Iterator::count)
                 .unwrap_or(0);
         }
-        if let Some(tool_name) = &message.tool_name {
+        if let Some(tool_name) = &message.tool_name() {
             chars += tool_name.chars().count();
         }
-        if let Some(tool_call_id) = &message.tool_call_id {
+        if let Some(tool_call_id) = &message.tool_call_id() {
             chars += tool_call_id.chars().count();
         }
-        if let Some(tool_result) = &message.tool_result {
+        if let Some(tool_result) = &message.tool_result_value() {
             chars += serialize_value(tool_result).chars().count();
         }
-        for tool_call in &message.tool_calls {
+        for tool_call in message.tool_calls() {
             chars += tool_call.id.chars().count();
             chars += tool_call.name.chars().count();
             chars += serialize_value(&tool_call.arguments).chars().count();
@@ -858,7 +871,7 @@ fn collect_tool_call_ids(messages: &[Message]) -> HashSet<String> {
         .iter()
         .flat_map(|message| {
             message
-                .tool_calls
+                .tool_calls()
                 .iter()
                 .map(|tool_call| tool_call.id.clone())
         })
@@ -869,8 +882,10 @@ fn collect_required_tool_call_ids(messages: &[Message]) -> HashSet<String> {
     messages
         .iter()
         .filter_map(|message| {
-            (message.role == "tool")
-                .then(|| message.tool_call_id.clone())
+            message
+                .role()
+                .eq("tool")
+                .then(|| message.tool_call_id().map(str::to_string))
                 .flatten()
         })
         .collect()
@@ -887,7 +902,7 @@ fn find_tool_call_message_index(
         .rev()
         .find_map(|(index, message)| {
             message
-                .tool_calls
+                .tool_calls()
                 .iter()
                 .any(|tool_call| tool_call.id == tool_call_id)
                 .then_some(index)
@@ -1053,8 +1068,8 @@ fn strip_existing_summary(system: &str) -> String {
 mod tests {
     use super::{ContextManager, ContextManagerConfig, merge_summary_into_system};
     use crate::ai::{
-        AiClient, AiConfig, AiError, ChatRequest, ChatResponse, Message, StreamChunk, ToolCall,
-        Usage,
+        AiAuth, AiClient, AiConfig, AiError, AiProvider, ChatRequest, ChatResponse, Message,
+        StreamChunk, ToolCall, Usage,
     };
     use futures_util::{
         StreamExt,
@@ -1082,7 +1097,7 @@ mod tests {
                 && self.calls.lock().unwrap().len() == 1
                 && request.messages.len() > 4
             {
-                return Err(AiError::Api("prompt is too long".to_string()));
+                return Err(AiError::api("prompt is too long".to_string()));
             }
             if request
                 .system
@@ -1094,10 +1109,10 @@ mod tests {
                     let summary_input = request
                         .messages
                         .first()
-                        .map(|message| message.content.chars().count())
+                        .map(|message| message.content_or_default().chars().count())
                         .unwrap_or_default();
                     if summary_input > max_chars {
-                        return Err(AiError::Api("prompt is too long".to_string()));
+                        return Err(AiError::api("prompt is too long".to_string()));
                     }
                 }
                 return Ok(ChatResponse {
@@ -1141,7 +1156,7 @@ mod tests {
         }
 
         async fn list_models(&self) -> Result<Vec<String>, AiError> {
-            Ok(vec![self.config.model.clone()])
+            Ok(vec![self.config.default_model.clone()])
         }
     }
 
@@ -1154,11 +1169,10 @@ mod tests {
             ..Default::default()
         });
         let client = MockClient {
-            config: AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://api.anthropic.com".to_string(),
-                model: "claude-sonnet-4-20250514".to_string(),
-            },
+            config: AiConfig::new(AiProvider::Anthropic)
+                .with_auth(AiAuth::ApiKey("test".to_string()))
+                .with_base_url("https://api.anthropic.com")
+                .with_default_model("claude-sonnet-4-20250514"),
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_large_once: false,
             summary_overflow_chars: None,
@@ -1186,11 +1200,10 @@ mod tests {
     async fn chat_retries_after_context_overflow() {
         let manager = ContextManager::default();
         let client = MockClient {
-            config: AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://unknown.example.com".to_string(),
-                model: "unknown".to_string(),
-            },
+            config: AiConfig::new(AiProvider::OpenAi)
+                .with_auth(AiAuth::BearerToken("test".to_string()))
+                .with_base_url("https://unknown.example.com")
+                .with_default_model("unknown"),
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_large_once: true,
             summary_overflow_chars: None,
@@ -1229,11 +1242,10 @@ mod tests {
             ..Default::default()
         });
         let client = MockClient {
-            config: AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://api.anthropic.com".to_string(),
-                model: "claude-sonnet-4-20250514".to_string(),
-            },
+            config: AiConfig::new(AiProvider::Anthropic)
+                .with_auth(AiAuth::ApiKey("test".to_string()))
+                .with_base_url("https://api.anthropic.com")
+                .with_default_model("claude-sonnet-4-20250514"),
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_large_once: false,
             summary_overflow_chars: None,
@@ -1267,8 +1279,7 @@ mod tests {
         assert!(compaction.microcompaction_passes >= 1);
         assert_eq!(prepared.request.messages.len(), 4);
         let tool_result = prepared.request.messages[1]
-            .tool_result
-            .as_ref()
+            .tool_result_value()
             .and_then(Value::as_str)
             .unwrap_or_default();
         assert!(tool_result.starts_with("[connect_llm compacted "));
@@ -1285,11 +1296,10 @@ mod tests {
             ..Default::default()
         });
         let client = MockClient {
-            config: AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://api.anthropic.com".to_string(),
-                model: "claude-sonnet-4-20250514".to_string(),
-            },
+            config: AiConfig::new(AiProvider::Anthropic)
+                .with_auth(AiAuth::ApiKey("test".to_string()))
+                .with_base_url("https://api.anthropic.com")
+                .with_default_model("claude-sonnet-4-20250514"),
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_large_once: false,
             summary_overflow_chars: None,
@@ -1318,7 +1328,7 @@ mod tests {
         assert!(compaction.microcompacted_messages >= 1);
         assert!(
             prepared.request.messages[0]
-                .content
+                .content_or_default()
                 .starts_with("[connect_llm compacted stale message excerpt")
         );
         assert!(prepared.request.system.is_none());
@@ -1333,11 +1343,10 @@ mod tests {
             ..Default::default()
         });
         let client = MockClient {
-            config: AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://api.anthropic.com".to_string(),
-                model: "claude-sonnet-4-20250514".to_string(),
-            },
+            config: AiConfig::new(AiProvider::Anthropic)
+                .with_auth(AiAuth::ApiKey("test".to_string()))
+                .with_base_url("https://api.anthropic.com")
+                .with_default_model("claude-sonnet-4-20250514"),
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_large_once: false,
             summary_overflow_chars: None,
@@ -1370,11 +1379,10 @@ mod tests {
             ..Default::default()
         });
         let client = MockClient {
-            config: AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://api.anthropic.com".to_string(),
-                model: "claude-sonnet-4-20250514".to_string(),
-            },
+            config: AiConfig::new(AiProvider::Anthropic)
+                .with_auth(AiAuth::ApiKey("test".to_string()))
+                .with_base_url("https://api.anthropic.com")
+                .with_default_model("claude-sonnet-4-20250514"),
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_large_once: true,
             summary_overflow_chars: None,
@@ -1428,11 +1436,10 @@ mod tests {
             ..Default::default()
         });
         let client = MockClient {
-            config: AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://api.anthropic.com".to_string(),
-                model: "claude-sonnet-4-20250514".to_string(),
-            },
+            config: AiConfig::new(AiProvider::Anthropic)
+                .with_auth(AiAuth::ApiKey("test".to_string()))
+                .with_base_url("https://api.anthropic.com")
+                .with_default_model("claude-sonnet-4-20250514"),
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_large_once: false,
             summary_overflow_chars: None,
@@ -1464,15 +1471,12 @@ mod tests {
         assert_eq!(prepared.request.messages.len(), 2);
         assert_eq!(
             prepared.request.messages[0]
-                .tool_calls
+                .tool_calls()
                 .first()
                 .map(|tool_call| tool_call.id.as_str()),
             Some("call_2")
         );
-        assert_eq!(
-            prepared.request.messages[1].tool_call_id.as_deref(),
-            Some("call_2")
-        );
+        assert_eq!(prepared.request.messages[1].tool_call_id(), Some("call_2"));
     }
 
     #[tokio::test]
@@ -1484,11 +1488,10 @@ mod tests {
             ..Default::default()
         });
         let client = MockClient {
-            config: AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://api.anthropic.com".to_string(),
-                model: "claude-sonnet-4-20250514".to_string(),
-            },
+            config: AiConfig::new(AiProvider::Anthropic)
+                .with_auth(AiAuth::ApiKey("test".to_string()))
+                .with_base_url("https://api.anthropic.com")
+                .with_default_model("claude-sonnet-4-20250514"),
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_large_once: false,
             summary_overflow_chars: Some(9_500),

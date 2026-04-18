@@ -42,11 +42,11 @@ impl GitHubCopilotClient {
         ]
     }
 
-    pub fn new(config: AiConfig) -> Self {
-        Self {
-            client: Client::new(),
+    pub fn new(config: AiConfig) -> Result<Self, AiError> {
+        Ok(Self {
+            client: config.http_client()?,
             config,
-        }
+        })
     }
 }
 
@@ -73,13 +73,13 @@ impl AiClient for GitHubCopilotClient {
             .json(&copilot_request)
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let response_debug = capture_debug_text(
             &format!("github_copilot response {} {}", status, url),
@@ -91,7 +91,7 @@ impl AiClient for GitHubCopilotClient {
         }
 
         let response: GitHubCopilotResponse =
-            serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+            serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
 
         Ok(convert::convert_response(
             response,
@@ -105,6 +105,7 @@ impl AiClient for GitHubCopilotClient {
         request: ChatRequest,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
         let config = self.config.clone();
+        let client = self.client.clone();
         let stream = async_stream::stream! {
             let auth = match auth::resolve_auth(&config).await {
                 Ok(auth) => auth,
@@ -122,7 +123,7 @@ impl AiClient for GitHubCopilotClient {
                 &copilot_request,
             );
 
-            let response = reqwest::Client::new()
+            let response = client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", auth.api_token))
                 .header("Content-Type", "application/json")
@@ -136,7 +137,7 @@ impl AiClient for GitHubCopilotClient {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    yield Err(AiError::Http(error.to_string()));
+                    yield Err(AiError::http(error.to_string()));
                     return;
                 }
             };
@@ -159,7 +160,7 @@ impl AiClient for GitHubCopilotClient {
                 let chunk = match chunk_result {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        yield Err(AiError::Http(error.to_string()));
+                        yield Err(AiError::http(error.to_string()));
                         return;
                     }
                 };
@@ -275,13 +276,13 @@ impl AiClient for GitHubCopilotClient {
             .header("x-initiator", "user")
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         if !status.is_success() {
             return Ok(Self::fallback_model_ids());
@@ -308,174 +309,5 @@ impl AiClient for GitHubCopilotClient {
         } else {
             Ok(model_ids)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        auth::{derive_copilot_api_base_url, parse_token_expiry},
-        convert,
-    };
-    use crate::ai::{
-        ChatRequest, Message, ThinkingConfig, ThinkingEffort, ThinkingOutput, ToolCall,
-    };
-    use serde_json::json;
-
-    #[test]
-    fn parses_copilot_proxy_base_url() {
-        let token = "tid=abc; proxy-ep=proxy.individual.githubcopilot.com; foo=bar";
-        assert_eq!(
-            derive_copilot_api_base_url(token).as_deref(),
-            Some("https://api.individual.githubcopilot.com")
-        );
-    }
-
-    #[test]
-    fn parses_token_expiry_seconds_or_millis() {
-        let seconds = serde_json::json!(1_800_000_000u64);
-        let millis = serde_json::json!(1_800_000_000_000u64);
-        assert_eq!(parse_token_expiry(&seconds).unwrap(), 1_800_000_000_000u64);
-        assert_eq!(parse_token_expiry(&millis).unwrap(), 1_800_000_000_000u64);
-    }
-
-    #[test]
-    fn converts_assistant_reasoning_fields() {
-        let request = ChatRequest {
-            model: "gpt-5.2-codex".to_string(),
-            messages: vec![Message {
-                role: "assistant".to_string(),
-                content: "done".to_string(),
-                created_at_ms: None,
-                thinking: Some(ThinkingOutput {
-                    text: Some("reason".to_string()),
-                    signature: Some("opaque".to_string()),
-                    redacted: None,
-                }),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                tool_name: None,
-                tool_result: None,
-                tool_error: None,
-            }],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: Some(256),
-            temperature: None,
-            system: None,
-            thinking: Some(ThinkingConfig::enabled_with_effort(ThinkingEffort::Medium)),
-        };
-
-        let converted = convert::convert_request(request, false);
-        assert_eq!(
-            converted.messages[0].reasoning_text.as_deref(),
-            Some("reason")
-        );
-        assert_eq!(
-            converted.messages[0].reasoning_opaque.as_deref(),
-            Some("opaque")
-        );
-        assert_eq!(converted.reasoning_effort, Some("medium"));
-    }
-
-    #[test]
-    fn converts_tool_results_into_tool_message_content() {
-        let request = ChatRequest {
-            model: "gpt-5.2-codex".to_string(),
-            messages: vec![
-                Message::assistant_tool_calls(vec![ToolCall {
-                    id: "call_1".to_string(),
-                    name: "search".to_string(),
-                    arguments: json!({"query": "さくら AI Engine"}),
-                }]),
-                Message::tool_result(
-                    "call_1",
-                    "search",
-                    json!({"results": [{"title": "さくらのAI Engine"}]}),
-                ),
-            ],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: Some(256),
-            temperature: None,
-            system: None,
-            thinking: None,
-        };
-
-        let converted = convert::convert_request(request, false);
-        assert_eq!(
-            converted.messages[1].content.as_deref(),
-            Some("{\"results\":[{\"title\":\"さくらのAI Engine\"}]}")
-        );
-        assert_eq!(
-            converted.messages[1].tool_call_id.as_deref(),
-            Some("call_1")
-        );
-        assert!(converted.messages[1].tool_calls.is_none());
-    }
-
-    #[test]
-    fn copilot_drops_temperature_for_codex_models() {
-        let request = ChatRequest {
-            model: "gpt-5.2-codex".to_string(),
-            messages: vec![Message::user("hello")],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: Some(256),
-            temperature: Some(0.4),
-            system: None,
-            thinking: None,
-        };
-
-        let converted = convert::convert_request(request, false);
-        assert_eq!(converted.temperature, None);
-    }
-
-    #[test]
-    fn copilot_claude_drops_reasoning_effort_but_keeps_budget() {
-        let request = ChatRequest {
-            model: "claude-sonnet-4.5".to_string(),
-            messages: vec![Message::user("hello")],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: Some(256),
-            temperature: None,
-            system: None,
-            thinking: Some(ThinkingConfig {
-                enabled: true,
-                effort: Some(ThinkingEffort::Medium),
-                budget_tokens: Some(4_000),
-                display: None,
-                clear_history: None,
-            }),
-        };
-
-        let converted = convert::convert_request(request, false);
-        assert_eq!(converted.reasoning_effort, None);
-        assert_eq!(converted.thinking_budget, Some(4_000));
-    }
-
-    #[test]
-    fn copilot_gemini_drops_reasoning_params() {
-        let request = ChatRequest {
-            model: "gemini-2.5-pro".to_string(),
-            messages: vec![Message::user("hello")],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: Some(256),
-            temperature: None,
-            system: None,
-            thinking: Some(ThinkingConfig {
-                enabled: true,
-                effort: Some(ThinkingEffort::Medium),
-                budget_tokens: Some(1_024),
-                display: None,
-                clear_history: None,
-            }),
-        };
-
-        let converted = convert::convert_request(request, false);
-        assert_eq!(converted.reasoning_effort, None);
-        assert_eq!(converted.thinking_budget, None);
     }
 }

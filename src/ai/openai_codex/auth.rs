@@ -166,7 +166,7 @@ fn generate_pkce_challenge(verifier: &str) -> String {
 fn build_authorize_url(redirect_uri: &str, verifier: &str, state: &str) -> Result<String, AiError> {
     let challenge = generate_pkce_challenge(verifier);
     let mut url = Url::parse(&format!("{}/oauth/authorize", ISSUER))
-        .map_err(|error| AiError::Parse(error.to_string()))?;
+        .map_err(|error| AiError::parse(error.to_string()))?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", CLIENT_ID)
@@ -268,7 +268,7 @@ fn wait_for_browser_callback(
                                         "400 Bad Request",
                                         &browser_auth_error_html(message),
                                     );
-                                    Err(AiError::Api(message.to_string()))
+                                    Err(AiError::api(message.to_string()))
                                 } else if let Some(error) = url
                                     .query_pairs()
                                     .find(|(key, _)| key == "error")
@@ -279,7 +279,7 @@ fn wait_for_browser_callback(
                                         "400 Bad Request",
                                         &browser_auth_error_html(&error),
                                     );
-                                    Err(AiError::Api(format!(
+                                    Err(AiError::api(format!(
                                         "OAuth authorization failed: {}",
                                         error
                                     )))
@@ -302,7 +302,7 @@ fn wait_for_browser_callback(
                                         "400 Bad Request",
                                         &browser_auth_error_html(message),
                                     );
-                                    Err(AiError::Api(message.to_string()))
+                                    Err(AiError::api(message.to_string()))
                                 }
                             }
                             Err(error) => {
@@ -312,24 +312,24 @@ fn wait_for_browser_callback(
                                     "400 Bad Request",
                                     &browser_auth_error_html(&message),
                                 );
-                                Err(AiError::Parse(message))
+                                Err(AiError::parse(message))
                             }
                         }
                     }
-                    Ok(_) => Err(AiError::Api(
+                    Ok(_) => Err(AiError::api(
                         "OAuth callback connection closed without a request.".to_string(),
                     )),
-                    Err(error) => Err(AiError::Http(error.to_string())),
+                    Err(error) => Err(AiError::http(error.to_string())),
                 }
             }
-            Err(error) => Err(AiError::Http(error.to_string())),
+            Err(error) => Err(AiError::http(error.to_string())),
         };
 
         let _ = sender.send(result);
     });
 
     receiver.recv_timeout(timeout).map_err(|_| {
-        AiError::Api("Timed out waiting for the browser OAuth callback.".to_string())
+        AiError::api("Timed out waiting for the browser OAuth callback.".to_string())
     })?
 }
 
@@ -485,41 +485,41 @@ fn resolve_codex_auth_path_with_override(auth_path: Option<PathBuf>) -> Result<P
     }
 
     let home = resolve_codex_home().ok_or_else(|| {
-        AiError::Api("Could not resolve CODEX_HOME or user home directory.".to_string())
+        AiError::api("Could not resolve CODEX_HOME or user home directory.".to_string())
     })?;
     Ok(home.join("auth.json"))
 }
 
 fn read_codex_auth_file(path: &Path) -> Result<LoadedCodexAuthFile, AiError> {
     let body = fs::read_to_string(path).map_err(|error| {
-        AiError::Api(format!(
+        AiError::api(format!(
             "Failed to read Codex auth file at {}: {}",
             path.display(),
             error
         ))
     })?;
     let document: Value =
-        serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+        serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
 
     let tokens = document
         .get("tokens")
         .and_then(Value::as_object)
         .ok_or_else(|| {
-            AiError::Api("Codex auth file does not contain a tokens object.".to_string())
+            AiError::api("Codex auth file does not contain a tokens object.".to_string())
         })?;
 
     let access_token = tokens
         .get("access_token")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| AiError::Api("Codex auth file does not contain access_token.".to_string()))?
+        .ok_or_else(|| AiError::api("Codex auth file does not contain access_token.".to_string()))?
         .to_string();
 
     let refresh_token = tokens
         .get("refresh_token")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| AiError::Api("Codex auth file does not contain refresh_token.".to_string()))?
+        .ok_or_else(|| AiError::api("Codex auth file does not contain refresh_token.".to_string()))?
         .to_string();
 
     let id_token = tokens
@@ -588,9 +588,9 @@ fn write_codex_auth_file(
     document["last_refresh"] = json!(now_ms());
 
     let text = serde_json::to_string_pretty(&document)
-        .map_err(|error| AiError::Parse(error.to_string()))?;
+        .map_err(|error| AiError::parse(error.to_string()))?;
     fs::write(&loaded.path, text).map_err(|error| {
-        AiError::Api(format!(
+        AiError::api(format!(
             "Failed to update Codex auth file at {}: {}",
             loaded.path.display(),
             error
@@ -618,7 +618,7 @@ fn persist_codex_auth_file(
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
-            AiError::Api(format!(
+            AiError::api(format!(
                 "Failed to create Codex auth directory at {}: {}",
                 parent.display(),
                 error
@@ -659,19 +659,19 @@ async fn refresh_access_token(
         .body(request_body)
         .send()
         .await
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
 
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
 
     if !status.is_success() {
         return Err(api_error_from_response(status, &body));
     }
 
-    serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))
+    serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))
 }
 
 fn exchange_code_for_tokens_blocking(
@@ -692,18 +692,18 @@ fn exchange_code_for_tokens_blocking(
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
 
     let status = response.status();
     let body = response
         .text()
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
 
     if !status.is_success() {
         return Err(api_error_from_response(status, &body));
     }
 
-    serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))
+    serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))
 }
 
 pub fn login_openai_codex_via_browser(
@@ -715,7 +715,7 @@ pub fn login_openai_codex_via_browser(
     let state = generate_random_url_safe_string(24);
     let authorize_url = build_authorize_url(&redirect_uri, &verifier, &state)?;
     let listener = TcpListener::bind(("127.0.0.1", callback_port)).map_err(|error| {
-        AiError::Api(format!(
+        AiError::api(format!(
             "Failed to bind OpenAI Codex OAuth callback on localhost:{}: {}",
             callback_port, error
         ))
@@ -724,7 +724,7 @@ pub fn login_openai_codex_via_browser(
     if options.open_browser {
         open_url_in_browser(&authorize_url)?;
     } else {
-        return Err(AiError::Api(format!(
+        return Err(AiError::api(format!(
             "Browser auto-open is disabled. Open this URL manually and implement a custom callback flow: {}",
             authorize_url
         )));
@@ -762,8 +762,11 @@ pub(super) async fn resolve_auth(
     client: &Client,
     config: &AiConfig,
 ) -> Result<ResolvedCodexAuth, AiError> {
-    let configured_token = config.api_key.trim();
-    if !configured_token.is_empty() {
+    if let Some(configured_token) = config
+        .bearer_token()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
         return Ok(ResolvedCodexAuth {
             access_token: configured_token.to_string(),
             account_id: extract_account_id_from_tokens(None, Some(configured_token)),

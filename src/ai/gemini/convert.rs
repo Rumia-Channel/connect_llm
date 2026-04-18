@@ -76,82 +76,99 @@ fn tool_result_object(value: Value) -> Value {
 }
 
 fn convert_message(message: Message) -> GeminiContent {
-    let Message {
-        role,
-        content,
-        created_at_ms: _,
-        thinking,
-        tool_calls,
-        tool_call_id,
-        tool_name,
-        tool_result,
-        tool_error: _,
-    } = message;
+    match message {
+        Message::Tool {
+            tool_call_id,
+            tool_name,
+            result,
+            ..
+        } => GeminiContent {
+            role: Some(convert_role("tool")),
+            parts: vec![GeminiPart {
+                text: None,
+                inline_data: None,
+                thought: None,
+                thought_signature: None,
+                function_call: None,
+                function_response: Some(GeminiFunctionResponse {
+                    name: tool_name,
+                    response: tool_result_object({
+                        let mut response = match tool_result_object(result) {
+                            Value::Object(map) => map,
+                            _ => unreachable!(),
+                        };
+                        response.insert("tool_call_id".to_string(), Value::String(tool_call_id));
+                        Value::Object(response)
+                    }),
+                }),
+            }],
+        },
+        Message::User {
+            content,
+            created_at_ms: _,
+        } => GeminiContent {
+            role: Some(convert_role("user")),
+            parts: vec![GeminiPart {
+                text: Some(content),
+                inline_data: None,
+                thought: None,
+                thought_signature: None,
+                function_call: None,
+                function_response: None,
+            }],
+        },
+        Message::Assistant {
+            content,
+            created_at_ms: _,
+            thinking,
+            tool_calls,
+        } => {
+            let mut parts = Vec::new();
 
-    let mut parts = Vec::new();
+            if let Some(thinking) = &thinking {
+                if let Some(text) = &thinking.text {
+                    parts.push(GeminiPart {
+                        text: Some(text.clone()),
+                        inline_data: None,
+                        thought: Some(true),
+                        thought_signature: None,
+                        function_call: None,
+                        function_response: None,
+                    });
+                }
+            }
 
-    if matches!(role.as_str(), "assistant" | "model") {
-        if let Some(thinking) = &thinking {
-            if let Some(text) = &thinking.text {
+            for tool_call in tool_calls {
                 parts.push(GeminiPart {
-                    text: Some(text.clone()),
+                    text: None,
                     inline_data: None,
-                    thought: Some(true),
+                    thought: None,
                     thought_signature: None,
+                    function_call: Some(GeminiFunctionCall {
+                        name: tool_call.name,
+                        args: tool_call.arguments,
+                    }),
+                    function_response: None,
+                });
+            }
+
+            let thought_signature = thinking.and_then(|thinking| thinking.signature);
+            if !content.is_empty() || parts.is_empty() {
+                parts.push(GeminiPart {
+                    text: Some(content),
+                    inline_data: None,
+                    thought: None,
+                    thought_signature,
                     function_call: None,
                     function_response: None,
                 });
             }
+
+            GeminiContent {
+                role: Some(convert_role("assistant")),
+                parts,
+            }
         }
-    }
-
-    for tool_call in tool_calls {
-        parts.push(GeminiPart {
-            text: None,
-            inline_data: None,
-            thought: None,
-            thought_signature: None,
-            function_call: Some(GeminiFunctionCall {
-                name: tool_call.name,
-                args: tool_call.arguments,
-            }),
-            function_response: None,
-        });
-    }
-
-    if role == "tool" {
-        parts.push(GeminiPart {
-            text: None,
-            inline_data: None,
-            thought: None,
-            thought_signature: None,
-            function_call: None,
-            function_response: Some(GeminiFunctionResponse {
-                name: tool_name.unwrap_or_else(|| "tool".to_string()),
-                response: tool_result_object(
-                    tool_result
-                        .or_else(|| tool_call_id.map(Value::String))
-                        .unwrap_or_else(|| Value::String(content.clone())),
-                ),
-            }),
-        });
-    }
-
-    let thought_signature = thinking.and_then(|thinking| thinking.signature);
-    if role != "tool" || !content.is_empty() {
-        parts.push(GeminiPart {
-            text: Some(content),
-            inline_data: None,
-            thought: None,
-            thought_signature,
-            function_call: None,
-            function_response: None,
-        });
-    }
-
-    GeminiContent {
-        role: Some(convert_role(&role)),
-        parts,
     }
 }
 

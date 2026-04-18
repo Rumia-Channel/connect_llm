@@ -13,43 +13,45 @@ use super::{
 };
 use futures_util::StreamExt;
 use reqwest::Client;
+
 pub struct OpenAiClient {
     client: Client,
     config: AiConfig,
 }
 
 impl OpenAiClient {
-    pub fn new(config: AiConfig) -> Self {
-        Self {
-            client: Client::new(),
+    pub fn new(config: AiConfig) -> Result<Self, AiError> {
+        Ok(Self {
+            client: config.http_client()?,
             config,
-        }
+        })
     }
 }
 
 #[async_trait::async_trait]
 impl AiClient for OpenAiClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
-        let url = convert::chat_completions_url(&self.config.base_url);
-        let openai_request = convert::convert_request(request, &self.config.base_url, false);
+        let api_key = self.config.require_bearer_token("chat")?;
+        let url = convert::chat_completions_url(self.config.base_url());
+        let openai_request = convert::convert_request(request, self.config.base_url(), false);
         let request_debug =
             capture_debug_json(&format!("openai request POST {}", url), &openai_request);
 
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .json(&openai_request)
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let response_debug =
             capture_debug_text(&format!("openai response {} {}", status, url), body.clone());
@@ -58,16 +60,16 @@ impl AiClient for OpenAiClient {
             return Err(api_error_from_response(
                 status,
                 &body,
-                &self.config.base_url,
+                self.config.base_url(),
             ));
         }
 
         let openai_response: OpenAiResponse =
-            serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+            serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
 
         Ok(convert::convert_response(
             openai_response,
-            &self.config.base_url,
+            self.config.base_url(),
             request_debug,
             response_debug,
         ))
@@ -77,10 +79,14 @@ impl AiClient for OpenAiClient {
         &self,
         request: ChatRequest,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
-        let url = convert::chat_completions_url(&self.config.base_url);
-        let openai_request = convert::convert_request(request, &self.config.base_url, true);
-        let api_key = self.config.api_key.clone();
-        let base_url = self.config.base_url.clone();
+        let url = convert::chat_completions_url(self.config.base_url());
+        let openai_request = convert::convert_request(request, self.config.base_url(), true);
+        let api_key = self
+            .config
+            .require_bearer_token("chat_stream")
+            .map(str::to_string);
+        let base_url = self.config.base_url().to_string();
+        let client = self.client.clone();
         let request_debug = capture_debug_json(
             &format!("openai stream request POST {}", url),
             &openai_request,
@@ -89,9 +95,16 @@ impl AiClient for OpenAiClient {
             convert::normalized_base_url(&base_url).contains("generativelanguage.googleapis.com");
 
         let stream = async_stream::stream! {
+            let api_key = match api_key {
+                Ok(api_key) => api_key,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
             let mut request_debug = request_debug;
             let mut thought_state = convert::EmbeddedThoughtState::default();
-            let response = reqwest::Client::new()
+            let response = client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", api_key))
                 .header("Content-Type", "application/json")
@@ -102,7 +115,7 @@ impl AiClient for OpenAiClient {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    yield Err(AiError::Http(error.to_string()));
+                    yield Err(AiError::http(error.to_string()));
                     return;
                 }
             };
@@ -125,7 +138,7 @@ impl AiClient for OpenAiClient {
                 let chunk = match chunk_result {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        yield Err(AiError::Http(error.to_string()));
+                        yield Err(AiError::http(error.to_string()));
                         return;
                     }
                 };
@@ -260,27 +273,28 @@ impl AiClient for OpenAiClient {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, AiError> {
-        list_models(&self.config.base_url, &self.config.api_key).await
+        list_models(&self.client, &self.config).await
     }
 }
 
-pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, AiError> {
-    let url = convert::models_url(base_url);
-    let response = reqwest::Client::new()
+pub async fn list_models(client: &Client, config: &AiConfig) -> Result<Vec<String>, AiError> {
+    let api_key = config.require_bearer_token("list_models")?;
+    let url = convert::models_url(config.base_url());
+    let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .send()
         .await
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
 
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
 
     if !status.is_success() {
-        if base_url.contains("api.z.ai/api/coding/paas/v4") {
+        if config.base_url().contains("api.z.ai/api/coding/paas/v4") {
             return Ok(vec![
                 "glm-5".to_string(),
                 "glm-4.7".to_string(),
@@ -289,7 +303,7 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, A
                 "glm-4.5-air".to_string(),
             ]);
         }
-        if base_url.contains("api.z.ai") {
+        if config.base_url().contains("api.z.ai") {
             return Ok(vec![
                 "glm-5".to_string(),
                 "glm-4.7".to_string(),
@@ -297,17 +311,18 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, A
                 "glm-4.5-air".to_string(),
             ]);
         }
-        return Err(api_error_from_response(status, &body, base_url));
+        return Err(api_error_from_response(status, &body, config.base_url()));
     }
 
     let models: ModelsResponse =
-        serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+        serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
 
     Ok(models.data.into_iter().map(|model| model.id).collect())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::OpenAiClient;
     use super::{
         convert,
         protocol::{
@@ -315,7 +330,10 @@ mod tests {
             OpenAiToolFunction, OpenAiUsage,
         },
     };
-    use crate::ai::{ChatRequest, Message, ToolCall, ToolChoice, ToolDefinition};
+    use crate::ai::{
+        AiAuth, AiConfig, AiProvider, ChatRequest, Message, ToolCall, ToolChoice, ToolDefinition,
+    };
+    use reqwest::Client;
     use serde_json::json;
 
     #[test]
@@ -413,5 +431,15 @@ mod tests {
         assert_eq!(converted.tool_calls.len(), 1);
         assert_eq!(converted.tool_calls[0].name, "get_weather");
         assert_eq!(converted.tool_calls[0].arguments, json!({"city": "Tokyo"}));
+    }
+
+    #[test]
+    fn constructor_uses_injected_http_client() {
+        let injected = Client::new();
+        let config = AiConfig::new(AiProvider::OpenAi)
+            .with_auth(AiAuth::BearerToken("test".to_string()))
+            .with_http_client(injected.clone());
+        let client = OpenAiClient::new(config).expect("client");
+        let _ = client;
     }
 }

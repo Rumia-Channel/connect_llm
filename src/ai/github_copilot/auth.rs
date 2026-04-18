@@ -110,7 +110,7 @@ fn home_dir() -> Result<PathBuf, AiError> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .ok_or_else(|| AiError::Api("Could not resolve user home directory.".to_string()))
+        .ok_or_else(|| AiError::api("Could not resolve user home directory.".to_string()))
 }
 
 pub fn github_copilot_auth_path() -> Result<PathBuf, AiError> {
@@ -145,7 +145,7 @@ pub(super) fn parse_token_expiry(expires_at: &serde_json::Value) -> Result<u64, 
                 .and_then(|value| value.parse::<u64>().ok())
         })
         .ok_or_else(|| {
-            AiError::Parse("GitHub Copilot token expiry was not a number.".to_string())
+            AiError::parse("GitHub Copilot token expiry was not a number.".to_string())
         })?;
 
     Ok(if raw >= 100_000_000_000 {
@@ -157,19 +157,19 @@ pub(super) fn parse_token_expiry(expires_at: &serde_json::Value) -> Result<u64, 
 
 fn load_auth_file(path: &Path) -> Result<GitHubCopilotAuthFile, AiError> {
     let body = fs::read_to_string(path).map_err(|error| {
-        AiError::Api(format!(
+        AiError::api(format!(
             "Failed to read GitHub Copilot auth file at {}: {}",
             path.display(),
             error
         ))
     })?;
-    serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))
+    serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))
 }
 
 fn save_auth_file(path: &Path, auth: &GitHubCopilotAuthFile) -> Result<(), AiError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
-            AiError::Api(format!(
+            AiError::api(format!(
                 "Failed to create GitHub Copilot auth directory at {}: {}",
                 parent.display(),
                 error
@@ -178,16 +178,16 @@ fn save_auth_file(path: &Path, auth: &GitHubCopilotAuthFile) -> Result<(), AiErr
     }
 
     let body =
-        serde_json::to_string_pretty(auth).map_err(|error| AiError::Parse(error.to_string()))?;
+        serde_json::to_string_pretty(auth).map_err(|error| AiError::parse(error.to_string()))?;
     let mut file = fs::File::create(path).map_err(|error| {
-        AiError::Api(format!(
+        AiError::api(format!(
             "Failed to write GitHub Copilot auth file at {}: {}",
             path.display(),
             error
         ))
     })?;
     file.write_all(body.as_bytes())
-        .map_err(|error| AiError::Api(error.to_string()))
+        .map_err(|error| AiError::api(error.to_string()))
 }
 
 pub fn login_github_copilot_via_device(
@@ -209,18 +209,18 @@ pub fn login_github_copilot_via_device(
             percent_encode_component("read:user"),
         ))
         .send()
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
 
     let status = device_code_response.status();
     let body = device_code_response
         .text()
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
     if !status.is_success() {
         return Err(api_error_from_response(status, &body));
     }
 
     let device_code: GitHubDeviceCodeResponse =
-        serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+        serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
 
     println!("GitHub Copilot device login");
     println!("Visit: {}", device_code.verification_uri);
@@ -238,7 +238,7 @@ pub fn login_github_copilot_via_device(
 
     loop {
         if started_at.elapsed() > timeout {
-            return Err(AiError::Api(
+            return Err(AiError::api(
                 "Timed out waiting for GitHub device authorization.".to_string(),
             ));
         }
@@ -256,18 +256,18 @@ pub fn login_github_copilot_via_device(
                 percent_encode_component("urn:ietf:params:oauth:grant-type:device_code"),
             ))
             .send()
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let status = token_response.status();
         let body = token_response
             .text()
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
         if !status.is_success() {
             return Err(api_error_from_response(status, &body));
         }
 
         let token_data: GitHubDeviceTokenResponse =
-            serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+            serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
 
         if let Some(access_token) = token_data.access_token {
             let auth_file = GitHubCopilotAuthFile {
@@ -293,7 +293,7 @@ pub fn login_github_copilot_via_device(
                 continue;
             }
             Some(other) => {
-                return Err(AiError::Api(format!(
+                return Err(AiError::api(format!(
                     "GitHub Copilot device flow failed: {}",
                     other
                 )));
@@ -311,23 +311,23 @@ async fn exchange_copilot_token(github_token: &str) -> Result<(String, u64, Stri
         .header("User-Agent", USER_AGENT)
         .send()
         .await
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
 
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
 
     if !status.is_success() {
-        return Err(AiError::Api(format!(
+        return Err(AiError::api(format!(
             "GitHub Copilot token exchange failed: HTTP {}: {}",
             status, body
         )));
     }
 
     let response: CopilotTokenExchangeResponse =
-        serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+        serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
     let expires_at_ms = parse_token_expiry(&response.expires_at)?;
     let base_url = derive_copilot_api_base_url(&response.token)
         .unwrap_or_else(|| DEFAULT_COPILOT_BASE_URL.to_string());
@@ -336,15 +336,18 @@ async fn exchange_copilot_token(github_token: &str) -> Result<(String, u64, Stri
 }
 
 pub(super) async fn resolve_auth(config: &AiConfig) -> Result<ResolvedCopilotAuth, AiError> {
-    if !config.api_key.trim().is_empty() {
-        let github_token = config.api_key.trim();
+    if let Some(github_token) = config
+        .bearer_token()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
         let exchanged = exchange_copilot_token(github_token).await;
         let (api_token, base_url) = match exchanged {
             Ok((api_token, _, base_url)) => (api_token, base_url),
             Err(_) => (
                 github_token.to_string(),
                 derive_copilot_api_base_url(github_token)
-                    .unwrap_or_else(|| config.base_url.trim().to_string()),
+                    .unwrap_or_else(|| config.base_url().trim().to_string()),
             ),
         };
 
@@ -364,12 +367,14 @@ pub(super) async fn resolve_auth(config: &AiConfig) -> Result<ResolvedCopilotAut
     let mut auth = load_auth_file(&path)?;
     let github_token = auth.github_token.trim();
     if github_token.is_empty() {
-        return Err(AiError::Api(
-            "GitHub Copilot auth file does not contain github_token.".to_string(),
-        ));
+        return Err(
+            AiError::auth("GitHub Copilot auth file does not contain github_token.")
+                .with_operation("resolve_auth")
+                .with_target(path.display().to_string()),
+        );
     }
 
-    let configured_base_url = config.base_url.trim();
+    let configured_base_url = config.base_url().trim();
     if let (Some(api_token), Some(expires_at_ms)) = (
         auth.copilot_api_token.clone(),
         auth.copilot_api_token_expires_at_ms,

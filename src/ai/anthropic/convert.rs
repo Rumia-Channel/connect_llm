@@ -6,7 +6,6 @@ use crate::ai::{
     ChatRequest, ChatResponse, DebugTrace, Message, ThinkingConfig, ThinkingDisplay,
     ThinkingOutput, ToolCall, ToolChoice, ToolDefinition, Usage,
 };
-use serde_json::Value;
 
 pub(super) fn convert_tools(tools: &[ToolDefinition]) -> Option<Vec<AnthropicToolDefinition>> {
     if tools.is_empty() {
@@ -47,20 +46,14 @@ pub(super) fn convert_tool_choice(choice: Option<&ToolChoice>) -> Option<Anthrop
 }
 
 pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessage {
-    let Message {
-        role,
-        content,
-        created_at_ms: _,
-        thinking,
-        tool_calls,
-        tool_call_id,
-        tool_name,
-        tool_result,
-        tool_error,
-    } = message;
-
-    if role == "tool" {
-        return AnthropicRequestMessage {
+    match message {
+        Message::Tool {
+            tool_call_id,
+            tool_name,
+            result,
+            is_error,
+            ..
+        } => AnthropicRequestMessage {
             role: "user".to_string(),
             content: vec![AnthropicRequestContentBlock {
                 content_type: "tool_result".to_string(),
@@ -69,24 +62,23 @@ pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessa
                 signature: None,
                 data: None,
                 id: None,
-                name: tool_name,
+                name: Some(tool_name),
                 input: None,
-                tool_use_id: tool_call_id,
-                content: Some(tool_result.unwrap_or_else(|| Value::String(content))),
-                is_error: tool_error,
+                tool_use_id: Some(tool_call_id),
+                content: Some(result),
+                is_error: is_error.then_some(true),
             }],
-        };
-    }
-
-    let mut blocks = Vec::new();
-
-    if let Some(thinking) = thinking {
-        if thinking.text.is_some() || thinking.signature.is_some() {
-            blocks.push(AnthropicRequestContentBlock {
-                content_type: "thinking".to_string(),
-                text: None,
-                thinking: Some(thinking.text.unwrap_or_default()),
-                signature: thinking.signature,
+        },
+        Message::User {
+            content,
+            created_at_ms: _,
+        } => AnthropicRequestMessage {
+            role: "user".to_string(),
+            content: vec![AnthropicRequestContentBlock {
+                content_type: "text".to_string(),
+                text: Some(content),
+                thinking: None,
+                signature: None,
                 data: None,
                 id: None,
                 name: None,
@@ -94,61 +86,87 @@ pub(super) fn convert_request_message(message: Message) -> AnthropicRequestMessa
                 tool_use_id: None,
                 content: None,
                 is_error: None,
-            });
+            }],
+        },
+        Message::Assistant {
+            content,
+            created_at_ms: _,
+            thinking,
+            tool_calls,
+        } => {
+            let mut blocks = Vec::new();
+
+            if let Some(thinking) = thinking {
+                if thinking.text.is_some() || thinking.signature.is_some() {
+                    blocks.push(AnthropicRequestContentBlock {
+                        content_type: "thinking".to_string(),
+                        text: None,
+                        thinking: Some(thinking.text.unwrap_or_default()),
+                        signature: thinking.signature,
+                        data: None,
+                        id: None,
+                        name: None,
+                        input: None,
+                        tool_use_id: None,
+                        content: None,
+                        is_error: None,
+                    });
+                }
+
+                if let Some(redacted) = thinking.redacted {
+                    blocks.push(AnthropicRequestContentBlock {
+                        content_type: "redacted_thinking".to_string(),
+                        text: None,
+                        thinking: None,
+                        signature: None,
+                        data: Some(redacted),
+                        id: None,
+                        name: None,
+                        input: None,
+                        tool_use_id: None,
+                        content: None,
+                        is_error: None,
+                    });
+                }
+            }
+
+            for tool_call in tool_calls {
+                blocks.push(AnthropicRequestContentBlock {
+                    content_type: "tool_use".to_string(),
+                    text: None,
+                    thinking: None,
+                    signature: None,
+                    data: None,
+                    id: Some(tool_call.id),
+                    name: Some(tool_call.name),
+                    input: Some(tool_call.arguments),
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                });
+            }
+
+            if !content.is_empty() {
+                blocks.push(AnthropicRequestContentBlock {
+                    content_type: "text".to_string(),
+                    text: Some(content),
+                    thinking: None,
+                    signature: None,
+                    data: None,
+                    id: None,
+                    name: None,
+                    input: None,
+                    tool_use_id: None,
+                    content: None,
+                    is_error: None,
+                });
+            }
+
+            AnthropicRequestMessage {
+                role: "assistant".to_string(),
+                content: blocks,
+            }
         }
-
-        if let Some(redacted) = thinking.redacted {
-            blocks.push(AnthropicRequestContentBlock {
-                content_type: "redacted_thinking".to_string(),
-                text: None,
-                thinking: None,
-                signature: None,
-                data: Some(redacted),
-                id: None,
-                name: None,
-                input: None,
-                tool_use_id: None,
-                content: None,
-                is_error: None,
-            });
-        }
-    }
-
-    for tool_call in tool_calls {
-        blocks.push(AnthropicRequestContentBlock {
-            content_type: "tool_use".to_string(),
-            text: None,
-            thinking: None,
-            signature: None,
-            data: None,
-            id: Some(tool_call.id),
-            name: Some(tool_call.name),
-            input: Some(tool_call.arguments),
-            tool_use_id: None,
-            content: None,
-            is_error: None,
-        });
-    }
-
-    if !content.is_empty() {
-        blocks.push(AnthropicRequestContentBlock {
-            content_type: "text".to_string(),
-            text: Some(content),
-            thinking: None,
-            signature: None,
-            data: None,
-            id: None,
-            name: None,
-            input: None,
-            tool_use_id: None,
-            content: None,
-            is_error: None,
-        });
-    }
-
-    AnthropicRequestMessage {
-        role,
-        content: blocks,
     }
 }
 

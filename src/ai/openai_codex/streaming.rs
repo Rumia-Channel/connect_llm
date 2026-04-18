@@ -45,7 +45,7 @@ pub(super) fn parse_response_body(body: &str) -> Result<ParsedResponseStream, Ai
         }
 
         let event: OpenAiCodexEvent =
-            serde_json::from_str(data).map_err(|error| AiError::Parse(error.to_string()))?;
+            serde_json::from_str(data).map_err(|error| AiError::parse(error.to_string()))?;
 
         match event.event_type.as_str() {
             "response.output_text.delta" => {
@@ -108,7 +108,7 @@ pub(super) fn parse_response_body(body: &str) -> Result<ParsedResponseStream, Ai
     }
 
     let response = final_response.ok_or_else(|| {
-        AiError::Parse("missing response.completed event in Codex stream".to_string())
+        AiError::parse("missing response.completed event in Codex stream".to_string())
     })?;
 
     Ok(ParsedResponseStream {
@@ -164,7 +164,7 @@ pub(super) fn parse_stream_line(
     }
 
     let event: OpenAiCodexEvent =
-        serde_json::from_str(data).map_err(|error| AiError::Parse(error.to_string()))?;
+        serde_json::from_str(data).map_err(|error| AiError::parse(error.to_string()))?;
 
     Ok(match event.event_type.as_str() {
         "response.output_text.delta" => {

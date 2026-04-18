@@ -18,14 +18,15 @@ pub use openai_codex::{
     openai_codex_auth_path,
 };
 use providers::{ApiStyle, ProviderSpec};
-use serde::{Deserialize, Serialize};
+use reqwest::header::HeaderMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
@@ -53,7 +54,11 @@ pub(crate) fn capture_debug_json<T: Serialize>(label: &str, value: &T) -> Option
     }
 
     let body = serde_json::to_string_pretty(value).ok()?;
-    Some(format!("[connect_llm debug] {}\n{}", label, body))
+    Some(format!(
+        "[connect_llm debug] {}
+{}",
+        label, body
+    ))
 }
 
 pub(crate) fn capture_debug_text(label: &str, body: impl Into<String>) -> Option<String> {
@@ -62,27 +67,63 @@ pub(crate) fn capture_debug_text(label: &str, body: impl Into<String>) -> Option
     }
 
     let body = body.into();
-    Some(format!("[connect_llm debug] {}\n{}", label, body))
+    Some(format!(
+        "[connect_llm debug] {}
+{}",
+        label, body
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Message {
+    User {
+        content: String,
+        created_at_ms: Option<u64>,
+    },
+    Assistant {
+        content: String,
+        created_at_ms: Option<u64>,
+        thinking: Option<ThinkingOutput>,
+        tool_calls: Vec<ToolCall>,
+    },
+    Tool {
+        tool_call_id: String,
+        tool_name: String,
+        result: Value,
+        is_error: bool,
+        created_at_ms: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: String,
-    pub content: String,
+struct MessageWire {
+    role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingOutput>,
+    content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<ToolCall>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_error: Option<bool>,
+    tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_name: Option<String>,
+    #[serde(
+        default,
+        rename = "tool_result",
+        alias = "result",
+        skip_serializing_if = "Option::is_none"
+    )]
+    result: Option<Value>,
+    #[serde(
+        default,
+        rename = "tool_error",
+        alias = "is_error",
+        skip_serializing_if = "Option::is_none"
+    )]
+    is_error: Option<bool>,
 }
 
 impl Message {
@@ -93,68 +134,318 @@ impl Message {
             .and_then(|duration| u64::try_from(duration.as_millis()).ok())
     }
 
-    pub fn with_created_at_ms(mut self, created_at_ms: u64) -> Self {
-        self.created_at_ms = Some(created_at_ms);
-        self
-    }
-
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: "user".to_string(),
+        Self::User {
             content: content.into(),
             created_at_ms: Self::now_timestamp_ms(),
-            thinking: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result: None,
-            tool_error: None,
         }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: "assistant".to_string(),
+        Self::Assistant {
             content: content.into(),
             created_at_ms: Self::now_timestamp_ms(),
             thinking: None,
             tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result: None,
-            tool_error: None,
         }
     }
 
     pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
-        Self {
-            role: "assistant".to_string(),
+        Self::Assistant {
             content: String::new(),
             created_at_ms: Self::now_timestamp_ms(),
             thinking: None,
             tool_calls,
-            tool_call_id: None,
-            tool_name: None,
-            tool_result: None,
-            tool_error: None,
         }
     }
 
     pub fn tool_result(
         tool_call_id: impl Into<String>,
         tool_name: impl Into<String>,
-        tool_result: Value,
+        result: Value,
     ) -> Self {
-        Self {
-            role: "tool".to_string(),
-            content: String::new(),
+        Self::Tool {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            result,
+            is_error: false,
             created_at_ms: Self::now_timestamp_ms(),
-            thinking: None,
-            tool_calls: Vec::new(),
-            tool_call_id: Some(tool_call_id.into()),
-            tool_name: Some(tool_name.into()),
-            tool_result: Some(tool_result),
-            tool_error: None,
+        }
+    }
+
+    pub fn with_created_at_ms(mut self, created_at_ms: u64) -> Self {
+        match &mut self {
+            Message::User {
+                created_at_ms: slot,
+                ..
+            }
+            | Message::Assistant {
+                created_at_ms: slot,
+                ..
+            }
+            | Message::Tool {
+                created_at_ms: slot,
+                ..
+            } => *slot = Some(created_at_ms),
+        }
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: ThinkingOutput) -> Self {
+        if let Message::Assistant {
+            thinking: current, ..
+        } = &mut self
+        {
+            *current = Some(thinking);
+        }
+        self
+    }
+
+    pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
+        if let Message::Assistant {
+            tool_calls: current,
+            ..
+        } = &mut self
+        {
+            *current = tool_calls;
+        }
+        self
+    }
+
+    pub fn role(&self) -> &'static str {
+        match self {
+            Message::User { .. } => "user",
+            Message::Assistant { .. } => "assistant",
+            Message::Tool { .. } => "tool",
+        }
+    }
+
+    pub fn created_at_ms(&self) -> Option<u64> {
+        match self {
+            Message::User { created_at_ms, .. }
+            | Message::Assistant { created_at_ms, .. }
+            | Message::Tool { created_at_ms, .. } => *created_at_ms,
+        }
+    }
+
+    pub fn content(&self) -> Option<&str> {
+        match self {
+            Message::User { content, .. } | Message::Assistant { content, .. } => Some(content),
+            Message::Tool { .. } => None,
+        }
+    }
+
+    pub fn content_or_default(&self) -> &str {
+        self.content().unwrap_or_default()
+    }
+
+    pub fn content_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Message::User { content, .. } | Message::Assistant { content, .. } => Some(content),
+            Message::Tool { .. } => None,
+        }
+    }
+
+    pub fn thinking(&self) -> Option<&ThinkingOutput> {
+        match self {
+            Message::Assistant { thinking, .. } => thinking.as_ref(),
+            Message::User { .. } | Message::Tool { .. } => None,
+        }
+    }
+
+    pub fn thinking_mut(&mut self) -> Option<&mut Option<ThinkingOutput>> {
+        match self {
+            Message::Assistant { thinking, .. } => Some(thinking),
+            Message::User { .. } | Message::Tool { .. } => None,
+        }
+    }
+
+    pub fn clear_thinking(&mut self) {
+        if let Some(thinking) = self.thinking_mut() {
+            *thinking = None;
+        }
+    }
+
+    pub fn tool_calls(&self) -> &[ToolCall] {
+        match self {
+            Message::Assistant { tool_calls, .. } => tool_calls,
+            Message::User { .. } | Message::Tool { .. } => &[],
+        }
+    }
+
+    pub fn tool_calls_mut(&mut self) -> Option<&mut Vec<ToolCall>> {
+        match self {
+            Message::Assistant { tool_calls, .. } => Some(tool_calls),
+            Message::User { .. } | Message::Tool { .. } => None,
+        }
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        match self {
+            Message::Tool { tool_call_id, .. } => Some(tool_call_id),
+            Message::User { .. } | Message::Assistant { .. } => None,
+        }
+    }
+
+    pub fn tool_name(&self) -> Option<&str> {
+        match self {
+            Message::Tool { tool_name, .. } => Some(tool_name),
+            Message::User { .. } | Message::Assistant { .. } => None,
+        }
+    }
+
+    pub fn tool_result_value(&self) -> Option<&Value> {
+        match self {
+            Message::Tool { result, .. } => Some(result),
+            Message::User { .. } | Message::Assistant { .. } => None,
+        }
+    }
+
+    pub fn tool_result_value_mut(&mut self) -> Option<&mut Value> {
+        match self {
+            Message::Tool { result, .. } => Some(result),
+            Message::User { .. } | Message::Assistant { .. } => None,
+        }
+    }
+
+    pub fn is_tool_error(&self) -> bool {
+        match self {
+            Message::Tool { is_error, .. } => *is_error,
+            Message::User { .. } | Message::Assistant { .. } => false,
+        }
+    }
+
+    pub fn set_tool_error(&mut self, is_error: bool) {
+        if let Message::Tool {
+            is_error: current, ..
+        } = self
+        {
+            *current = is_error;
+        }
+    }
+
+    pub fn as_user(&self) -> Option<&str> {
+        match self {
+            Message::User { content, .. } => Some(content),
+            Message::Assistant { .. } | Message::Tool { .. } => None,
+        }
+    }
+
+    pub fn as_assistant(&self) -> Option<&str> {
+        match self {
+            Message::Assistant { content, .. } => Some(content),
+            Message::User { .. } | Message::Tool { .. } => None,
+        }
+    }
+
+    pub fn as_tool(&self) -> Option<(&str, &str, &Value, bool)> {
+        match self {
+            Message::Tool {
+                tool_call_id,
+                tool_name,
+                result,
+                is_error,
+                ..
+            } => Some((tool_call_id, tool_name, result, *is_error)),
+            Message::User { .. } | Message::Assistant { .. } => None,
+        }
+    }
+}
+
+impl Serialize for Message {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        MessageWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = MessageWire::deserialize(deserializer)?;
+        match wire.role.as_str() {
+            "user" => Ok(Message::User {
+                content: wire.content.unwrap_or_default(),
+                created_at_ms: wire.created_at_ms,
+            }),
+            "assistant" => Ok(Message::Assistant {
+                content: wire.content.unwrap_or_default(),
+                created_at_ms: wire.created_at_ms,
+                thinking: wire.thinking,
+                tool_calls: wire.tool_calls,
+            }),
+            "tool" => Ok(Message::Tool {
+                tool_call_id: wire.tool_call_id.unwrap_or_default(),
+                tool_name: wire.tool_name.unwrap_or_else(|| "tool".to_string()),
+                result: wire
+                    .result
+                    .or_else(|| wire.content.map(Value::String))
+                    .unwrap_or(Value::Null),
+                is_error: wire.is_error.unwrap_or(false),
+                created_at_ms: wire.created_at_ms,
+            }),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["user", "assistant", "tool"],
+            )),
+        }
+    }
+}
+
+impl From<&Message> for MessageWire {
+    fn from(message: &Message) -> Self {
+        match message {
+            Message::User {
+                content,
+                created_at_ms,
+            } => Self {
+                role: "user".to_string(),
+                content: Some(content.clone()),
+                created_at_ms: *created_at_ms,
+                thinking: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: None,
+                result: None,
+                is_error: None,
+            },
+            Message::Assistant {
+                content,
+                created_at_ms,
+                thinking,
+                tool_calls,
+            } => Self {
+                role: "assistant".to_string(),
+                content: Some(content.clone()),
+                created_at_ms: *created_at_ms,
+                thinking: thinking.clone(),
+                tool_calls: tool_calls.clone(),
+                tool_call_id: None,
+                tool_name: None,
+                result: None,
+                is_error: None,
+            },
+            Message::Tool {
+                tool_call_id,
+                tool_name,
+                result,
+                is_error,
+                created_at_ms,
+            } => Self {
+                role: "tool".to_string(),
+                content: Some(String::new()),
+                created_at_ms: *created_at_ms,
+                thinking: None,
+                tool_calls: Vec::new(),
+                tool_call_id: Some(tool_call_id.clone()),
+                tool_name: Some(tool_name.clone()),
+                result: Some(result.clone()),
+                is_error: (*is_error).then_some(true),
+            },
         }
     }
 }
@@ -287,7 +578,7 @@ impl ToolDefinition {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -320,7 +611,7 @@ impl ToolChoice {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ThinkingOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -347,9 +638,9 @@ pub(crate) fn serialize_tool_arguments(arguments: &Value) -> String {
 
 pub(crate) fn message_tool_result_value(message: &Message) -> Value {
     message
-        .tool_result
-        .clone()
-        .unwrap_or_else(|| Value::String(message.content.clone()))
+        .tool_result_value()
+        .cloned()
+        .unwrap_or_else(|| Value::String(message.content().unwrap_or_default().to_string()))
 }
 
 impl ThinkingOutput {
@@ -420,41 +711,6 @@ pub enum ThinkingDisplay {
     Omitted,
 }
 
-#[derive(Debug, Clone)]
-pub struct AiConfig {
-    pub api_key: String,
-    pub base_url: String,
-    pub model: String,
-}
-
-#[async_trait::async_trait]
-pub trait AiClient: Send + Sync {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError>;
-    fn chat_stream(&self, request: ChatRequest)
-    -> BoxStream<'static, Result<StreamChunk, AiError>>;
-    fn config(&self) -> &AiConfig;
-    async fn list_models(&self) -> Result<Vec<String>, AiError>;
-}
-
-#[derive(Debug)]
-pub enum AiError {
-    Http(String),
-    Parse(String),
-    Api(String),
-}
-
-impl std::fmt::Display for AiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AiError::Http(msg) => write!(f, "HTTP error: {}", msg),
-            AiError::Parse(msg) => write!(f, "Parse error: {}", msg),
-            AiError::Api(msg) => write!(f, "API error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for AiError {}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiProvider {
     Anthropic,
@@ -470,6 +726,337 @@ pub enum AiProvider {
     ZAi,
     ZAiCoding,
 }
+
+#[derive(Debug, Clone, Default)]
+pub enum AiAuth {
+    #[default]
+    None,
+    BearerToken(String),
+    ApiKey(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct AiEndpointConfig {
+    pub base_url: String,
+}
+
+impl AiEndpointConfig {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AiHttpConfig {
+    pub timeout: Option<Duration>,
+    pub extra_headers: HeaderMap,
+    pub client: Option<reqwest::Client>,
+}
+
+impl AiHttpConfig {
+    pub fn build_client(&self, provider: AiProvider) -> Result<reqwest::Client, AiError> {
+        if let Some(client) = &self.client {
+            return Ok(client.clone());
+        }
+
+        let mut builder = reqwest::Client::builder();
+        if let Some(timeout) = self.timeout {
+            builder = builder.timeout(timeout);
+        }
+        if !self.extra_headers.is_empty() {
+            builder = builder.default_headers(self.extra_headers.clone());
+        }
+
+        builder.build().map_err(|error| {
+            AiError::configuration("failed to build HTTP client")
+                .with_provider(provider)
+                .with_operation("create_client")
+                .with_target("reqwest::Client")
+                .with_context(error.to_string())
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AiConfig {
+    pub provider: AiProvider,
+    pub endpoint: AiEndpointConfig,
+    pub auth: AiAuth,
+    pub default_model: String,
+    pub http: AiHttpConfig,
+}
+
+impl AiConfig {
+    pub fn new(provider: AiProvider) -> Self {
+        Self {
+            provider,
+            endpoint: AiEndpointConfig::new(provider.default_base_url()),
+            auth: AiAuth::None,
+            default_model: provider.default_model().to_string(),
+            http: AiHttpConfig::default(),
+        }
+    }
+
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.endpoint.base_url = base_url.into();
+        self
+    }
+
+    pub fn with_auth(mut self, auth: AiAuth) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
+        self.default_model = model.into();
+        self
+    }
+
+    pub fn with_http(mut self, http: AiHttpConfig) -> Self {
+        self.http = http;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.http.timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_extra_headers(mut self, extra_headers: HeaderMap) -> Self {
+        self.http.extra_headers = extra_headers;
+        self
+    }
+
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http.client = Some(client);
+        self
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.endpoint.base_url
+    }
+
+    pub fn default_model(&self) -> &str {
+        &self.default_model
+    }
+
+    pub fn bearer_token(&self) -> Option<&str> {
+        match &self.auth {
+            AiAuth::BearerToken(token) => Some(token.as_str()),
+            AiAuth::None | AiAuth::ApiKey(_) => None,
+        }
+    }
+
+    pub fn api_key(&self) -> Option<&str> {
+        match &self.auth {
+            AiAuth::ApiKey(token) => Some(token.as_str()),
+            AiAuth::None | AiAuth::BearerToken(_) => None,
+        }
+    }
+
+    pub fn require_bearer_token(&self, operation: &str) -> Result<&str, AiError> {
+        match &self.auth {
+            AiAuth::BearerToken(token) => Ok(token.as_str()),
+            AiAuth::None => Err(AiError::auth("missing bearer token authentication")
+                .with_provider(self.provider)
+                .with_operation(operation)
+                .with_target(self.base_url())),
+            AiAuth::ApiKey(_) => Err(AiError::configuration(
+                "bearer token authentication is required",
+            )
+            .with_provider(self.provider)
+            .with_operation(operation)
+            .with_target(self.base_url())),
+        }
+    }
+
+    pub fn require_api_key(&self, operation: &str) -> Result<&str, AiError> {
+        match &self.auth {
+            AiAuth::ApiKey(token) => Ok(token.as_str()),
+            AiAuth::None => Err(AiError::auth("missing API key authentication")
+                .with_provider(self.provider)
+                .with_operation(operation)
+                .with_target(self.base_url())),
+            AiAuth::BearerToken(_) => {
+                Err(AiError::configuration("API key authentication is required")
+                    .with_provider(self.provider)
+                    .with_operation(operation)
+                    .with_target(self.base_url()))
+            }
+        }
+    }
+
+    pub fn http_client(&self) -> Result<reqwest::Client, AiError> {
+        self.http.build_client(self.provider)
+    }
+}
+
+#[async_trait::async_trait]
+pub trait AiClient: Send + Sync {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError>;
+    fn chat_stream(&self, request: ChatRequest)
+    -> BoxStream<'static, Result<StreamChunk, AiError>>;
+    fn config(&self) -> &AiConfig;
+    async fn list_models(&self) -> Result<Vec<String>, AiError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiErrorKind {
+    Http,
+    Parse,
+    Api,
+    Auth,
+    Configuration,
+    Io,
+}
+
+impl AiErrorKind {
+    fn label(&self) -> &'static str {
+        match self {
+            AiErrorKind::Http => "HTTP",
+            AiErrorKind::Parse => "Parse",
+            AiErrorKind::Api => "API",
+            AiErrorKind::Auth => "Auth",
+            AiErrorKind::Configuration => "Configuration",
+            AiErrorKind::Io => "I/O",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AiError {
+    pub kind: AiErrorKind,
+    pub message: String,
+    pub provider: Option<AiProvider>,
+    pub operation: Option<String>,
+    pub status: Option<u16>,
+    pub code: Option<String>,
+    pub target: Option<String>,
+}
+
+impl AiError {
+    pub fn new(kind: AiErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            provider: None,
+            operation: None,
+            status: None,
+            code: None,
+            target: None,
+        }
+    }
+
+    pub fn http(message: impl Into<String>) -> Self {
+        Self::new(AiErrorKind::Http, message)
+    }
+
+    pub fn parse(message: impl Into<String>) -> Self {
+        Self::new(AiErrorKind::Parse, message)
+    }
+
+    pub fn api(message: impl Into<String>) -> Self {
+        Self::new(AiErrorKind::Api, message)
+    }
+
+    pub fn auth(message: impl Into<String>) -> Self {
+        Self::new(AiErrorKind::Auth, message)
+    }
+
+    pub fn configuration(message: impl Into<String>) -> Self {
+        Self::new(AiErrorKind::Configuration, message)
+    }
+
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::new(AiErrorKind::Io, message)
+    }
+
+    pub fn with_provider(mut self, provider: AiProvider) -> Self {
+        self.provider = Some(provider);
+        self
+    }
+
+    pub fn with_operation(mut self, operation: impl Into<String>) -> Self {
+        self.operation = Some(operation.into());
+        self
+    }
+
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    pub fn with_status_code(mut self, status: reqwest::StatusCode) -> Self {
+        self.status = Some(status.as_u16());
+        self
+    }
+
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    pub fn with_target(mut self, target: impl Into<String>) -> Self {
+        self.target = Some(target.into());
+        self
+    }
+
+    pub fn with_context(mut self, context: impl AsRef<str>) -> Self {
+        let context = context.as_ref();
+        if context.is_empty() {
+            return self;
+        }
+        if self.message.is_empty() {
+            self.message = context.to_string();
+        } else {
+            self.message = format!("{} ({})", self.message, context);
+        }
+        self
+    }
+}
+
+impl std::fmt::Display for AiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut scope = Vec::new();
+        if let Some(provider) = self.provider {
+            scope.push(provider.name().to_string());
+        }
+        if let Some(operation) = &self.operation {
+            scope.push(operation.clone());
+        }
+
+        let mut qualifiers = Vec::new();
+        if let Some(status) = self.status {
+            qualifiers.push(format!("status {}", status));
+        }
+        if let Some(code) = &self.code {
+            qualifiers.push(format!("code {}", code));
+        }
+        if let Some(target) = &self.target {
+            qualifiers.push(format!("target {}", target));
+        }
+
+        if !scope.is_empty() {
+            write!(f, "{} {} error", scope.join(" "), self.kind.label())?;
+        } else {
+            write!(f, "{} error", self.kind.label())?;
+        }
+
+        if !qualifiers.is_empty() {
+            write!(f, " [{}]", qualifiers.join(", "))?;
+        }
+
+        if !self.message.is_empty() {
+            write!(f, ": {}", self.message)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl std::error::Error for AiError {}
 
 impl AiProvider {
     fn spec(&self) -> ProviderSpec {
@@ -550,18 +1137,31 @@ impl AiProvider {
         self.spec().default_base_url
     }
 
-    pub fn create_client(&self, config: AiConfig) -> Arc<dyn AiClient> {
+    pub fn create_client(&self, mut config: AiConfig) -> Result<Arc<dyn AiClient>, AiError> {
+        config.provider = *self;
+        if config.endpoint.base_url.trim().is_empty() {
+            config.endpoint.base_url = self.default_base_url().to_string();
+        }
+        if config.default_model.trim().is_empty() {
+            config.default_model = self.default_model().to_string();
+        }
+
         match self.spec().api_style {
             ApiStyle::Anthropic => {
-                Arc::new(anthropic::AnthropicClient::new(config)) as Arc<dyn AiClient>
+                Ok(Arc::new(anthropic::AnthropicClient::new(config)?) as Arc<dyn AiClient>)
             }
-            ApiStyle::Gemini => Arc::new(gemini::GeminiClient::new(config)) as Arc<dyn AiClient>,
+            ApiStyle::Gemini => {
+                Ok(Arc::new(gemini::GeminiClient::new(config)?) as Arc<dyn AiClient>)
+            }
             ApiStyle::GitHubCopilot => {
-                Arc::new(github_copilot::GitHubCopilotClient::new(config)) as Arc<dyn AiClient>
+                Ok(Arc::new(github_copilot::GitHubCopilotClient::new(config)?)
+                    as Arc<dyn AiClient>)
             }
-            ApiStyle::OpenAi => Arc::new(openai::OpenAiClient::new(config)) as Arc<dyn AiClient>,
+            ApiStyle::OpenAi => {
+                Ok(Arc::new(openai::OpenAiClient::new(config)?) as Arc<dyn AiClient>)
+            }
             ApiStyle::OpenAiCodex => {
-                Arc::new(openai_codex::OpenAiCodexClient::new(config)) as Arc<dyn AiClient>
+                Ok(Arc::new(openai_codex::OpenAiCodexClient::new(config)?) as Arc<dyn AiClient>)
             }
         }
     }
@@ -580,5 +1180,47 @@ impl AiProvider {
 
     pub fn supports_tools(&self) -> bool {
         self.spec().supports_tools
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Message;
+    use serde_json::json;
+
+    #[test]
+    fn serializes_tool_messages_with_legacy_wire_fields() {
+        let mut message = Message::tool_result("call_1", "lookup", json!({"ok": true}));
+        message.set_tool_error(true);
+
+        let value = serde_json::to_value(&message).expect("serialize tool message");
+
+        assert_eq!(value.get("role"), Some(&json!("tool")));
+        assert_eq!(value.get("content"), Some(&json!("")));
+        assert_eq!(value.get("tool_result"), Some(&json!({"ok": true})));
+        assert_eq!(value.get("tool_error"), Some(&json!(true)));
+        assert!(value.get("result").is_none());
+        assert!(value.get("is_error").is_none());
+    }
+
+    #[test]
+    fn deserializes_legacy_tool_message_shape() {
+        let value = json!({
+            "role": "tool",
+            "content": "",
+            "tool_call_id": "call_1",
+            "tool_name": "lookup",
+            "tool_result": { "ok": true },
+            "tool_error": true
+        });
+
+        let message: Message =
+            serde_json::from_value(value).expect("deserialize legacy tool message");
+        let (tool_call_id, tool_name, result, is_error) = message.as_tool().expect("tool message");
+
+        assert_eq!(tool_call_id, "call_1");
+        assert_eq!(tool_name, "lookup");
+        assert_eq!(result, &json!({"ok": true}));
+        assert!(is_error);
     }
 }

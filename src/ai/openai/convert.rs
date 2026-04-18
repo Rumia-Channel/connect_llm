@@ -290,37 +290,49 @@ pub(super) fn convert_request(request: ChatRequest, base_url: &str, stream: bool
     }
 
     for message in request_messages {
-        let Message {
-            role,
-            content,
-            created_at_ms: _,
-            thinking,
-            tool_calls,
-            tool_call_id,
-            tool_name: _,
-            tool_result,
-            tool_error: _,
-        } = message;
-        let is_tool_message = role == "tool";
-        let reasoning_content = thinking.and_then(|thinking| thinking.text);
-        let content = if is_tool_message {
-            Some(serialize_tool_arguments(
-                &tool_result.unwrap_or_else(|| Value::String(content.clone())),
-            ))
-        } else if content.is_empty() && !tool_calls.is_empty() {
-            None
-        } else {
-            Some(content)
-        };
-        messages.push(OpenAiMessage {
-            role,
-            content,
-            reasoning_content: (!is_tool_message).then_some(reasoning_content).flatten(),
-            tool_call_id,
-            tool_calls: (!is_tool_message)
-                .then(|| convert_tool_calls(tool_calls))
-                .flatten(),
-        });
+        match message {
+            Message::Tool {
+                tool_call_id,
+                result,
+                ..
+            } => messages.push(OpenAiMessage {
+                role: "tool".to_string(),
+                content: Some(serialize_tool_arguments(&result)),
+                reasoning_content: None,
+                tool_call_id: Some(tool_call_id),
+                tool_calls: None,
+            }),
+            Message::User {
+                content,
+                created_at_ms: _,
+            } => messages.push(OpenAiMessage {
+                role: "user".to_string(),
+                content: Some(content),
+                reasoning_content: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }),
+            Message::Assistant {
+                content,
+                created_at_ms: _,
+                thinking,
+                tool_calls,
+            } => {
+                let reasoning_content = thinking.and_then(|thinking| thinking.text);
+                let content = if content.is_empty() && !tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(content)
+                };
+                messages.push(OpenAiMessage {
+                    role: "assistant".to_string(),
+                    content,
+                    reasoning_content,
+                    tool_call_id: None,
+                    tool_calls: convert_tool_calls(tool_calls),
+                });
+            }
+        }
     }
 
     OpenAiRequest {

@@ -73,7 +73,7 @@ pub(crate) async fn send_mcp_request(
 
     finish_stream_output(&state);
     finished.ok_or_else(|| {
-        connect_llm::AiError::Api("MCP stream terminated without a final response".to_string())
+        connect_llm::AiError::api("MCP stream terminated without a final response".to_string())
     })
 }
 
@@ -102,7 +102,7 @@ fn print_stream_chunk(
             print!("{}", thinking_delta);
             io::stdout()
                 .flush()
-                .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+                .map_err(|error| connect_llm::AiError::http(error.to_string()))?;
             state.printed_thinking_output = true;
         }
     }
@@ -112,7 +112,7 @@ fn print_stream_chunk(
         print!("{}", chunk.delta);
         io::stdout()
             .flush()
-            .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+            .map_err(|error| connect_llm::AiError::http(error.to_string()))?;
         state.printed_assistant_output = true;
     }
 
@@ -135,7 +135,7 @@ fn print_mcp_finished_fallback(
         print!("{}", text);
         io::stdout()
             .flush()
-            .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+            .map_err(|error| connect_llm::AiError::http(error.to_string()))?;
         state.printed_thinking_output = true;
     }
 
@@ -144,7 +144,7 @@ fn print_mcp_finished_fallback(
         print!("{}", managed.response.content);
         io::stdout()
             .flush()
-            .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+            .map_err(|error| connect_llm::AiError::http(error.to_string()))?;
         state.printed_assistant_output = true;
     }
 
@@ -177,7 +177,7 @@ fn print_mcp_tool_execution_event(
     print_mcp_tool_execution(execution, debug_enabled);
     io::stdout()
         .flush()
-        .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+        .map_err(|error| connect_llm::AiError::http(error.to_string()))?;
     state.current_section = None;
     state.printed_anything = true;
     Ok(())
@@ -198,7 +198,7 @@ fn begin_stream_section(
     }
     io::stdout()
         .flush()
-        .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+        .map_err(|error| connect_llm::AiError::http(error.to_string()))?;
     state.current_section = Some(section);
     state.printed_anything = true;
     Ok(())
@@ -209,7 +209,7 @@ fn finish_active_stream_line(state: &mut PrintedStreamState) -> Result<(), conne
         println!();
         io::stdout()
             .flush()
-            .map_err(|error| connect_llm::AiError::Http(error.to_string()))?;
+            .map_err(|error| connect_llm::AiError::http(error.to_string()))?;
         state.current_section = None;
     }
     Ok(())

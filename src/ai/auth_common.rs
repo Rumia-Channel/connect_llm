@@ -16,7 +16,7 @@ pub(crate) fn open_url_in_browser(url: &str) -> Result<(), AiError> {
             .args(["/C", "start", "", url])
             .spawn()
             .map_err(|error| {
-                AiError::Api(format!(
+                AiError::api(format!(
                     "Failed to open browser automatically: {}. Open this URL manually: {}",
                     error, url
                 ))
@@ -27,7 +27,7 @@ pub(crate) fn open_url_in_browser(url: &str) -> Result<(), AiError> {
     #[cfg(target_os = "macos")]
     {
         Command::new("open").arg(url).spawn().map_err(|error| {
-            AiError::Api(format!(
+            AiError::api(format!(
                 "Failed to open browser automatically: {}. Open this URL manually: {}",
                 error, url
             ))
@@ -38,7 +38,7 @@ pub(crate) fn open_url_in_browser(url: &str) -> Result<(), AiError> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         Command::new("xdg-open").arg(url).spawn().map_err(|error| {
-            AiError::Api(format!(
+            AiError::api(format!(
                 "Failed to open browser automatically: {}. Open this URL manually: {}",
                 error, url
             ))
@@ -47,7 +47,7 @@ pub(crate) fn open_url_in_browser(url: &str) -> Result<(), AiError> {
     }
 
     #[allow(unreachable_code)]
-    Err(AiError::Api(format!(
+    Err(AiError::api(format!(
         "Automatic browser opening is not supported on this platform. Open this URL manually: {}",
         url
     )))

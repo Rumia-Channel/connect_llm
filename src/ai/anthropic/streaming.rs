@@ -57,7 +57,7 @@ pub(super) fn consume_line(
                 done: true,
                 debug: debug_trace(request_debug, response_debug),
             })),
-            "error" => Err(AiError::Api(data)),
+            "error" => Err(AiError::api(data)),
             "content_block_delta" => {
                 convert_content_block_delta(data, response_debug, request_debug)
             }
@@ -83,7 +83,7 @@ fn convert_content_block_delta(
     request_debug: &mut Option<String>,
 ) -> Result<Option<StreamChunk>, AiError> {
     let stream_response: AnthropicStreamResponse =
-        serde_json::from_str(&data).map_err(|error| AiError::Parse(error.to_string()))?;
+        serde_json::from_str(&data).map_err(|error| AiError::parse(error.to_string()))?;
     let Some(delta) = stream_response.delta else {
         return Ok(None);
     };
@@ -140,7 +140,7 @@ fn convert_content_block_start(
     request_debug: &mut Option<String>,
 ) -> Result<Option<StreamChunk>, AiError> {
     let stream_response: AnthropicStreamResponse =
-        serde_json::from_str(&data).map_err(|error| AiError::Parse(error.to_string()))?;
+        serde_json::from_str(&data).map_err(|error| AiError::parse(error.to_string()))?;
     let Some(content_block) = stream_response.content_block else {
         return Ok(None);
     };

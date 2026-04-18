@@ -12,17 +12,18 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
+
 pub struct GeminiClient {
     client: Client,
     config: AiConfig,
 }
 
 impl GeminiClient {
-    pub fn new(config: AiConfig) -> Self {
-        Self {
-            client: Client::new(),
+    pub fn new(config: AiConfig) -> Result<Self, AiError> {
+        Ok(Self {
+            client: config.http_client()?,
             config,
-        }
+        })
     }
 
     fn normalized_base_url(base_url: &str) -> &str {
@@ -61,7 +62,8 @@ impl GeminiClient {
 #[async_trait::async_trait]
 impl AiClient for GeminiClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
-        let url = Self::generate_content_url(&self.config.base_url, &request.model);
+        let api_key = self.config.require_api_key("chat")?;
+        let url = Self::generate_content_url(self.config.base_url(), &request.model);
         let request_model = request.model.clone();
         let gemini_request = convert::convert_request(request);
         let request_debug =
@@ -70,18 +72,18 @@ impl AiClient for GeminiClient {
         let response = self
             .client
             .post(&url)
-            .header("x-goog-api-key", &self.config.api_key)
+            .header("x-goog-api-key", api_key)
             .header("Content-Type", "application/json")
             .json(&gemini_request)
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
         let response_debug =
             capture_debug_text(&format!("gemini response {} {}", status, url), body.clone());
 
@@ -90,7 +92,7 @@ impl AiClient for GeminiClient {
         }
 
         let gemini_response: GeminiResponse =
-            serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+            serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
 
         Ok(convert::convert_response(
             gemini_response,
@@ -104,18 +106,29 @@ impl AiClient for GeminiClient {
         &self,
         request: ChatRequest,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
-        let url = Self::stream_generate_content_url(&self.config.base_url, &request.model);
-        let api_key = self.config.api_key.clone();
+        let url = Self::stream_generate_content_url(self.config.base_url(), &request.model);
+        let api_key = self
+            .config
+            .require_api_key("chat_stream")
+            .map(str::to_string);
         let request_model = request.model.clone();
         let gemini_request = convert::convert_request(request);
         let request_debug = capture_debug_json(
             &format!("gemini stream request POST {}", url),
             &gemini_request,
         );
+        let client = self.client.clone();
 
         let stream = async_stream::stream! {
+            let api_key = match api_key {
+                Ok(api_key) => api_key,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
             let mut request_debug = request_debug;
-            let response = reqwest::Client::new()
+            let response = client
                 .post(&url)
                 .header("x-goog-api-key", api_key)
                 .header("Content-Type", "application/json")
@@ -126,7 +139,7 @@ impl AiClient for GeminiClient {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    yield Err(AiError::Http(error.to_string()));
+                    yield Err(AiError::http(error.to_string()));
                     return;
                 }
             };
@@ -149,7 +162,7 @@ impl AiClient for GeminiClient {
                 let chunk = match chunk_result {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        yield Err(AiError::Http(error.to_string()));
+                        yield Err(AiError::http(error.to_string()));
                         return;
                     }
                 };
@@ -355,26 +368,28 @@ impl AiClient for GeminiClient {
             supported_generation_methods: Vec<String>,
         }
 
-        let url = Self::models_url(&self.config.base_url);
-        let response = reqwest::Client::new()
+        let api_key = self.config.require_api_key("list_models")?;
+        let url = Self::models_url(self.config.base_url());
+        let response = self
+            .client
             .get(&url)
-            .header("x-goog-api-key", &self.config.api_key)
+            .header("x-goog-api-key", api_key)
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         if !status.is_success() {
             return Err(api_error_from_response(status, &body));
         }
 
         let models: GeminiModelsResponse =
-            serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+            serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
 
         Ok(models
             .models

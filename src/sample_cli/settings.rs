@@ -1,10 +1,34 @@
 use crate::sample_cli::io::{prompt, prompt_default};
 use connect_llm::{
-    AiConfig, AiProvider, McpBridge, McpConfig, McpRuntime, Message, ThinkingConfig,
+    AiAuth, AiConfig, AiProvider, McpBridge, McpConfig, McpRuntime, Message, ThinkingConfig,
     ThinkingEffort, github_copilot_auth_path, login_github_copilot_via_device,
     login_openai_codex_via_browser, openai_codex_auth_path,
 };
 use std::{path::Path, sync::Arc};
+
+fn config_auth_for_provider(provider: AiProvider, api_key: &str) -> AiAuth {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return AiAuth::None;
+    }
+
+    match provider {
+        AiProvider::Anthropic | AiProvider::Gemini => AiAuth::ApiKey(api_key.to_string()),
+        _ => AiAuth::BearerToken(api_key.to_string()),
+    }
+}
+
+pub(crate) fn build_ai_config(
+    provider: AiProvider,
+    api_key: impl AsRef<str>,
+    base_url: impl Into<String>,
+    model: impl Into<String>,
+) -> AiConfig {
+    AiConfig::new(provider)
+        .with_auth(config_auth_for_provider(provider, api_key.as_ref()))
+        .with_base_url(base_url)
+        .with_default_model(model)
+}
 
 pub(crate) const PROVIDERS: [AiProvider; 12] = [
     AiProvider::Sakura,
@@ -319,7 +343,7 @@ pub(crate) fn sanitize_messages_for_request(
         .cloned()
         .map(|mut message| {
             if !include_thinking {
-                message.thinking = None;
+                message.clear_thinking();
             }
             message
         })
@@ -330,10 +354,11 @@ pub(crate) fn temp_client(
     provider: AiProvider,
     api_key: String,
     base_url: String,
-) -> Arc<dyn connect_llm::AiClient> {
-    provider.create_client(AiConfig {
+) -> Result<Arc<dyn connect_llm::AiClient>, connect_llm::AiError> {
+    provider.create_client(build_ai_config(
+        provider,
         api_key,
         base_url,
-        model: provider.default_model().to_string(),
-    })
+        provider.default_model().to_string(),
+    ))
 }

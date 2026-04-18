@@ -5,9 +5,8 @@ use super::protocol::{
     OpenAiCodexToolChoice,
 };
 use crate::ai::{
-    ChatRequest, ChatResponse, DebugTrace, ThinkingConfig, ThinkingEffort, ThinkingOutput,
-    ToolCall, ToolChoice, Usage, message_tool_result_value, parse_tool_arguments, providers,
-    serialize_tool_arguments,
+    ChatRequest, ChatResponse, DebugTrace, Message, ThinkingConfig, ThinkingEffort, ThinkingOutput,
+    ToolCall, ToolChoice, Usage, parse_tool_arguments, providers, serialize_tool_arguments,
 };
 
 const DEFAULT_CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
@@ -102,45 +101,59 @@ pub(super) fn convert_request(request: ChatRequest, stream: bool) -> OpenAiCodex
     let mut input = Vec::new();
 
     for message in request_messages {
-        if message.role == "tool" {
-            if let Some(call_id) = message.tool_call_id.clone() {
-                let output = serialize_tool_arguments(&message_tool_result_value(&message));
-
-                input.push(OpenAiCodexInputItem::FunctionCallOutput(
-                    OpenAiCodexFunctionCallOutputItem {
-                        item_type: "function_call_output",
-                        call_id,
-                        output,
-                    },
-                ));
-            }
-            continue;
-        }
-
-        if !message.content.is_empty() {
-            let content_type = if message.role == "assistant" {
-                "output_text"
-            } else {
-                "input_text"
-            };
-            input.push(OpenAiCodexInputItem::Message(OpenAiCodexInputMessage {
-                role: message.role.clone(),
-                content: vec![OpenAiCodexInputContent {
-                    content_type,
-                    text: message.content.clone(),
-                }],
-            }));
-        }
-
-        for tool_call in message.tool_calls {
-            input.push(OpenAiCodexInputItem::FunctionCall(
-                OpenAiCodexFunctionCallItem {
-                    item_type: "function_call",
-                    call_id: tool_call.id,
-                    name: tool_call.name,
-                    arguments: serialize_tool_arguments(&tool_call.arguments),
+        match message {
+            Message::Tool {
+                tool_call_id,
+                result,
+                ..
+            } => input.push(OpenAiCodexInputItem::FunctionCallOutput(
+                OpenAiCodexFunctionCallOutputItem {
+                    item_type: "function_call_output",
+                    call_id: tool_call_id,
+                    output: serialize_tool_arguments(&result),
                 },
-            ));
+            )),
+            Message::User {
+                content,
+                created_at_ms: _,
+            } => {
+                if !content.is_empty() {
+                    input.push(OpenAiCodexInputItem::Message(OpenAiCodexInputMessage {
+                        role: "user".to_string(),
+                        content: vec![OpenAiCodexInputContent {
+                            content_type: "input_text",
+                            text: content,
+                        }],
+                    }));
+                }
+            }
+            Message::Assistant {
+                content,
+                created_at_ms: _,
+                thinking: _,
+                tool_calls,
+            } => {
+                if !content.is_empty() {
+                    input.push(OpenAiCodexInputItem::Message(OpenAiCodexInputMessage {
+                        role: "assistant".to_string(),
+                        content: vec![OpenAiCodexInputContent {
+                            content_type: "output_text",
+                            text: content,
+                        }],
+                    }));
+                }
+
+                for tool_call in tool_calls {
+                    input.push(OpenAiCodexInputItem::FunctionCall(
+                        OpenAiCodexFunctionCallItem {
+                            item_type: "function_call",
+                            call_id: tool_call.id,
+                            name: tool_call.name,
+                            arguments: serialize_tool_arguments(&tool_call.arguments),
+                        },
+                    ));
+                }
+            }
         }
     }
 

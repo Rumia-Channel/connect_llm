@@ -1,4 +1,4 @@
-use crate::ai::{AiError, ToolCall, ToolCallDelta, parse_tool_arguments};
+use crate::ai::{AiError, AiProvider, ToolCall, ToolCallDelta, parse_tool_arguments};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -212,7 +212,24 @@ pub(super) struct ModelInfo {
     pub id: String,
 }
 
-fn format_error_detail(
+fn infer_provider(base_url: &str) -> Option<AiProvider> {
+    let base_url = base_url.to_ascii_lowercase();
+    if base_url.contains("generativelanguage.googleapis.com") {
+        Some(AiProvider::GoogleAiStudio)
+    } else if base_url.contains("moonshot") {
+        Some(AiProvider::Kimi)
+    } else if base_url.contains("x.ai") {
+        Some(AiProvider::Grok)
+    } else if base_url.contains("z.ai") {
+        Some(AiProvider::ZAi)
+    } else if base_url.contains("localhost") || base_url.contains("127.0.0.1") {
+        None
+    } else {
+        Some(AiProvider::OpenAi)
+    }
+}
+
+fn preferred_error_message(
     status: reqwest::StatusCode,
     base_url: &str,
     detail: &OpenAiErrorDetail,
@@ -237,21 +254,7 @@ fn format_error_detail(
         }
     }
 
-    let mut parts = vec![format!("HTTP {}", status)];
-
-    if let Some(code) = &detail.code {
-        if !code.is_empty() {
-            parts.push(format!("code {}", code));
-        }
-    }
-
-    if let Some(error_type) = &detail.error_type {
-        if !error_type.is_empty() {
-            parts.push(error_type.clone());
-        }
-    }
-
-    format!("{}: {}", parts.join(" / "), detail.message)
+    detail.message.clone()
 }
 
 pub(super) fn api_error_from_response(
@@ -259,11 +262,30 @@ pub(super) fn api_error_from_response(
     body: &str,
     base_url: &str,
 ) -> AiError {
+    let provider = infer_provider(base_url);
     if let Ok(error) = serde_json::from_str::<OpenAiError>(body) {
-        return AiError::Api(format_error_detail(status, base_url, &error.error));
+        let mut structured = AiError::api(preferred_error_message(status, base_url, &error.error))
+            .with_status_code(status)
+            .with_target(base_url);
+        if let Some(provider) = provider {
+            structured = structured.with_provider(provider);
+        }
+        if let Some(code) = error.error.code.clone() {
+            structured = structured.with_code(code);
+        }
+        if let Some(error_type) = error.error.error_type.clone() {
+            structured = structured.with_context(error_type);
+        }
+        return structured;
     }
 
-    AiError::Api(format!("HTTP {}: {}", status, body))
+    let mut structured = AiError::api(body.to_string())
+        .with_status_code(status)
+        .with_target(base_url);
+    if let Some(provider) = provider {
+        structured = structured.with_provider(provider);
+    }
+    structured
 }
 
 pub(super) fn convert_tool_calls_to_response(

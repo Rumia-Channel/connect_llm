@@ -27,11 +27,11 @@ pub struct OpenAiCodexClient {
 }
 
 impl OpenAiCodexClient {
-    pub fn new(config: AiConfig) -> Self {
-        Self {
-            client: Client::new(),
+    pub fn new(config: AiConfig) -> Result<Self, AiError> {
+        Ok(Self {
+            client: config.http_client()?,
             config,
-        }
+        })
     }
     fn convert_request(request: ChatRequest, stream: bool) -> OpenAiCodexRequest {
         convert::convert_request(request, stream)
@@ -50,7 +50,7 @@ impl OpenAiCodexClient {
 impl AiClient for OpenAiCodexClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
         let auth = auth::resolve_auth(&self.client, &self.config).await?;
-        let url = convert::endpoint_url(&self.config.base_url);
+        let url = convert::endpoint_url(self.config.base_url());
         let request = convert::convert_request(request, true);
         let request_debug =
             capture_debug_json(&format!("openai_codex request POST {}", url), &request);
@@ -70,13 +70,13 @@ impl AiClient for OpenAiCodexClient {
         let response = builder
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
         let response_debug = capture_debug_text(
             &format!("openai_codex response {} {}", status, url),
             body.clone(),
@@ -115,7 +115,7 @@ impl AiClient for OpenAiCodexClient {
         let client = self.client.clone();
         let config = self.config.clone();
         let request = convert::convert_request(request, true);
-        let endpoint_url = convert::endpoint_url(&config.base_url);
+        let endpoint_url = convert::endpoint_url(config.base_url());
         let request_debug = capture_debug_json(
             &format!("openai_codex stream request POST {}", endpoint_url),
             &request,
@@ -146,7 +146,7 @@ impl AiClient for OpenAiCodexClient {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    yield Err(AiError::Http(error.to_string()));
+                    yield Err(AiError::http(error.to_string()));
                     return;
                 }
             };
@@ -170,7 +170,7 @@ impl AiClient for OpenAiCodexClient {
                 let chunk = match chunk_result {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        yield Err(AiError::Http(error.to_string()));
+                        yield Err(AiError::http(error.to_string()));
                         return;
                     }
                 };
@@ -237,190 +237,5 @@ impl AiClient for OpenAiCodexClient {
             "gpt-5.4".to_string(),
             "gpt-5.4-mini".to_string(),
         ])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        OpenAiCodexClient,
-        auth::{base64_url_decode, extract_account_id_from_tokens},
-        protocol::{
-            OpenAiCodexInputItem, OpenAiCodexOutputItem, OpenAiCodexResponse, OpenAiCodexToolChoice,
-        },
-    };
-    use crate::ai::{
-        ChatRequest, Message, ThinkingConfig, ThinkingEffort, ToolCall, ToolChoice, ToolDefinition,
-    };
-    use serde_json::json;
-
-    #[test]
-    fn decodes_base64_url_without_padding() {
-        let decoded = base64_url_decode("eyJmb28iOiJiYXIifQ").expect("decoded");
-        assert_eq!(
-            String::from_utf8(decoded).expect("utf8"),
-            r#"{"foo":"bar"}"#
-        );
-    }
-
-    #[test]
-    fn codex_request_uses_medium_reasoning_when_thinking_is_enabled() {
-        let request = ChatRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: "hello".to_string(),
-                created_at_ms: None,
-                thinking: None,
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                tool_name: None,
-                tool_result: None,
-                tool_error: None,
-            }],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            thinking: Some(ThinkingConfig::enabled()),
-        };
-
-        let converted = OpenAiCodexClient::convert_request(request, false);
-        assert_eq!(
-            converted.reasoning.and_then(|reasoning| reasoning.effort),
-            Some("medium")
-        );
-        assert_eq!(converted.temperature, None);
-    }
-
-    #[test]
-    fn codex_request_uses_explicit_reasoning_effort() {
-        let request = ChatRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: "hello".to_string(),
-                created_at_ms: None,
-                thinking: None,
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                tool_name: None,
-                tool_result: None,
-                tool_error: None,
-            }],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            thinking: Some(ThinkingConfig::enabled_with_effort(ThinkingEffort::XHigh)),
-        };
-
-        let converted = OpenAiCodexClient::convert_request(request, false);
-        assert_eq!(
-            converted.reasoning.and_then(|reasoning| reasoning.effort),
-            Some("xhigh")
-        );
-    }
-
-    #[test]
-    fn codex_request_drops_temperature() {
-        let request = ChatRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![Message::user("hello")],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: None,
-            temperature: Some(0.3),
-            system: None,
-            thinking: None,
-        };
-
-        let converted = OpenAiCodexClient::convert_request(request, false);
-        assert_eq!(converted.temperature, None);
-    }
-
-    #[test]
-    fn codex_request_includes_tools_and_tool_outputs() {
-        let request = ChatRequest {
-            model: "gpt-5.4".to_string(),
-            messages: vec![
-                Message::assistant_tool_calls(vec![ToolCall {
-                    id: "call_123".to_string(),
-                    name: "get_weather".to_string(),
-                    arguments: json!({"city": "Tokyo"}),
-                }]),
-                Message::tool_result("call_123", "get_weather", json!({"temp_c": 21})),
-            ],
-            tools: vec![ToolDefinition::function(
-                "get_weather",
-                Some("Get weather".to_string()),
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "city": { "type": "string" }
-                    },
-                    "required": ["city"]
-                }),
-            )],
-            tool_choice: Some(ToolChoice::tool("get_weather")),
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            thinking: None,
-        };
-
-        let converted = OpenAiCodexClient::convert_request(request, true);
-
-        assert_eq!(converted.tools.as_ref().map(Vec::len), Some(1));
-        assert!(matches!(
-            converted.tool_choice,
-            Some(OpenAiCodexToolChoice::Function { .. })
-        ));
-        assert!(matches!(
-            converted.input.first(),
-            Some(OpenAiCodexInputItem::FunctionCall(_))
-        ));
-        assert!(matches!(
-            converted.input.get(1),
-            Some(OpenAiCodexInputItem::FunctionCallOutput(_))
-        ));
-    }
-
-    #[test]
-    fn codex_response_parses_tool_calls() {
-        let response = OpenAiCodexResponse {
-            id: "resp_123".to_string(),
-            model: "gpt-5.4".to_string(),
-            usage: None,
-            output: vec![OpenAiCodexOutputItem {
-                item_type: "function_call".to_string(),
-                id: Some("fc_123".to_string()),
-                call_id: Some("call_123".to_string()),
-                name: Some("get_weather".to_string()),
-                arguments: Some(r#"{"city":"Tokyo"}"#.to_string()),
-                status: Some("completed".to_string()),
-                encrypted_content: None,
-                content: Vec::new(),
-                summary: Vec::new(),
-                role: None,
-            }],
-        };
-
-        let converted = OpenAiCodexClient::convert_response(response, None, None);
-        assert_eq!(converted.tool_calls.len(), 1);
-        assert_eq!(converted.tool_calls[0].id, "call_123");
-        assert_eq!(converted.tool_calls[0].name, "get_weather");
-        assert_eq!(converted.tool_calls[0].arguments, json!({"city": "Tokyo"}));
-    }
-
-    #[test]
-    fn extracts_account_id_from_access_token_claims() {
-        let token = "eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoib3JnXzEyMyJ9fQ.";
-        assert_eq!(
-            extract_account_id_from_tokens(None, Some(token)).as_deref(),
-            Some("org_123")
-        );
     }
 }

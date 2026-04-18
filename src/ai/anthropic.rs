@@ -12,25 +12,26 @@ use super::{
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
+
 pub struct AnthropicClient {
     client: Client,
     config: AiConfig,
 }
 
 impl AnthropicClient {
-    pub fn new(config: AiConfig) -> Self {
-        Self {
-            client: Client::new(),
+    pub fn new(config: AiConfig) -> Result<Self, AiError> {
+        Ok(Self {
+            client: config.http_client()?,
             config,
-        }
+        })
     }
 
     fn is_native_anthropic(&self) -> bool {
-        self.config.base_url.contains("api.anthropic.com")
+        self.config.base_url().contains("api.anthropic.com")
     }
 
     fn is_kimi_coding(&self) -> bool {
-        self.config.base_url.contains("kimi.com/coding")
+        self.config.base_url().contains("kimi.com/coding")
     }
 
     fn anthropic_beta_header(&self) -> Option<&'static str> {
@@ -94,8 +95,9 @@ impl AnthropicClient {
 #[async_trait::async_trait]
 impl AiClient for AnthropicClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiError> {
+        let api_key = self.config.require_api_key("chat")?;
         let request = self.resolve_request_defaults(request);
-        let url = format!("{}/v1/messages", self.config.base_url);
+        let url = format!("{}/v1/messages", self.config.base_url());
         let anthropic_request = convert::convert_request(request);
         let request_debug = capture_debug_json(
             &format!("anthropic request POST {}", url),
@@ -105,7 +107,7 @@ impl AiClient for AnthropicClient {
         let mut builder = self
             .client
             .post(&url)
-            .header("x-api-key", &self.config.api_key)
+            .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
         if let Some(beta) = self.anthropic_beta_header() {
@@ -116,13 +118,13 @@ impl AiClient for AnthropicClient {
             .json(&anthropic_request)
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
         let response_debug = capture_debug_text(
             &format!("anthropic response {} {}", status, url),
             body.clone(),
@@ -133,7 +135,7 @@ impl AiClient for AnthropicClient {
         }
 
         let anthropic_response: AnthropicResponse =
-            serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+            serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
 
         Ok(convert::convert_response(
             anthropic_response,
@@ -147,19 +149,30 @@ impl AiClient for AnthropicClient {
         request: ChatRequest,
     ) -> futures_util::stream::BoxStream<'static, Result<StreamChunk, AiError>> {
         let request = self.resolve_request_defaults(request);
-        let url = format!("{}/v1/messages", self.config.base_url);
+        let url = format!("{}/v1/messages", self.config.base_url());
         let mut anthropic_request = convert::convert_request(request);
         anthropic_request.stream = Some(true);
-        let api_key = self.config.api_key.clone();
+        let api_key = self
+            .config
+            .require_api_key("chat_stream")
+            .map(str::to_string);
         let anthropic_beta_header = self.anthropic_beta_header().map(str::to_string);
         let request_debug = capture_debug_json(
             &format!("anthropic stream request POST {}", url),
             &anthropic_request,
         );
+        let client = self.client.clone();
 
         let stream = async_stream::stream! {
+            let api_key = match api_key {
+                Ok(api_key) => api_key,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
             let mut request_debug = request_debug;
-            let mut builder = reqwest::Client::new()
+            let mut builder = client
                 .post(&url)
                 .header("x-api-key", &api_key)
                 .header("anthropic-version", "2023-06-01")
@@ -176,7 +189,7 @@ impl AiClient for AnthropicClient {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    yield Err(AiError::Http(error.to_string()));
+                    yield Err(AiError::http(error.to_string()));
                     return;
                 }
             };
@@ -189,7 +202,7 @@ impl AiClient for AnthropicClient {
                     &format!("anthropic stream response {} {}", status, url),
                     body.clone(),
                 );
-                yield Err(AiError::Api(format!("HTTP {}: {}", status, body)));
+                yield Err(api_error_from_response(status, &body));
                 return;
             }
 
@@ -201,7 +214,7 @@ impl AiClient for AnthropicClient {
                 let chunk = match chunk_result {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        yield Err(AiError::Http(error.to_string()));
+                        yield Err(AiError::http(error.to_string()));
                         return;
                     }
                 };
@@ -256,11 +269,13 @@ impl AiClient for AnthropicClient {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, AiError> {
-        let url = format!("{}/v1/models", self.config.base_url);
+        let api_key = self.config.require_api_key("list_models")?;
+        let url = format!("{}/v1/models", self.config.base_url());
 
-        let mut builder = reqwest::Client::new()
+        let mut builder = self
+            .client
             .get(&url)
-            .header("x-api-key", &self.config.api_key)
+            .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01");
         if let Some(beta) = self.anthropic_beta_header() {
             builder = builder.header("anthropic-beta", beta);
@@ -269,13 +284,13 @@ impl AiClient for AnthropicClient {
         let response = builder
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
 
         if !status.is_success() {
             if self.is_kimi_coding() {
@@ -295,7 +310,7 @@ impl AiClient for AnthropicClient {
         }
 
         let models: ModelsResponse =
-            serde_json::from_str(&body).map_err(|error| AiError::Parse(error.to_string()))?;
+            serde_json::from_str(&body).map_err(|error| AiError::parse(error.to_string()))?;
 
         Ok(models.data.into_iter().map(|model| model.id).collect())
     }
@@ -305,7 +320,8 @@ impl AiClient for AnthropicClient {
 mod tests {
     use super::{AnthropicClient, convert};
     use crate::ai::{
-        AiConfig, ChatRequest, Message, ThinkingConfig, ToolCall, ToolChoice, ToolDefinition,
+        AiAuth, AiConfig, AiProvider, ChatRequest, Message, ThinkingConfig, ToolCall, ToolChoice,
+        ToolDefinition,
     };
     use serde_json::json;
 
@@ -351,11 +367,13 @@ mod tests {
 
     #[test]
     fn resolves_anthropic_default_max_tokens() {
-        let client = AnthropicClient::new(AiConfig {
-            api_key: "test".to_string(),
-            base_url: "https://api.anthropic.com".to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
-        });
+        let client = AnthropicClient::new(
+            AiConfig::new(AiProvider::Anthropic)
+                .with_auth(AiAuth::ApiKey("test".to_string()))
+                .with_base_url("https://api.anthropic.com")
+                .with_default_model("claude-sonnet-4-20250514"),
+        )
+        .expect("client");
 
         let request = ChatRequest::new("claude-sonnet-4-20250514", vec![Message::user("hi")]);
         let resolved = client.resolve_request_defaults(request);
@@ -364,11 +382,13 @@ mod tests {
 
     #[test]
     fn resolves_kimi_coding_defaults() {
-        let client = AnthropicClient::new(AiConfig {
-            api_key: "test".to_string(),
-            base_url: "https://api.kimi.com/coding".to_string(),
-            model: "k2p5".to_string(),
-        });
+        let client = AnthropicClient::new(
+            AiConfig::new(AiProvider::Anthropic)
+                .with_auth(AiAuth::ApiKey("test".to_string()))
+                .with_base_url("https://api.kimi.com/coding")
+                .with_default_model("k2p5"),
+        )
+        .expect("client");
 
         let mut request = ChatRequest::new("k2p5", vec![Message::user("hi")]);
         request.thinking = Some(ThinkingConfig::enabled());

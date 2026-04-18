@@ -7,14 +7,14 @@ use self::io::{
     print_mcp_tools, print_thinking, print_tool_calls, prompt, prompt_default, prompt_multiline,
 };
 use self::settings::{
-    build_thinking_config, describe_codex_effort, ensure_provider_auth_ready,
+    build_ai_config, build_thinking_config, describe_codex_effort, ensure_provider_auth_ready,
     load_mcp_runtime_from_path, normalize_mcp_path, parse_codex_effort, parse_debug_mode,
     parse_stream_mode, parse_thinking_toggle, sanitize_messages_for_request, select_codex_effort,
     select_debug_mode, select_mcp_path, select_model, select_provider, select_stream_mode,
     select_thinking_enabled, temp_client,
 };
 use self::streaming::{send_mcp_request, send_request};
-use connect_llm::{AiConfig, ChatRequest, ContextManager, Message, set_debug_logging};
+use connect_llm::{ChatRequest, ContextManager, Message, set_debug_logging};
 
 fn describe_compaction(compaction: &connect_llm::ContextCompaction) -> String {
     if compaction.microcompacted_messages > 0 && compaction.summarized_messages > 0 {
@@ -67,7 +67,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     ensure_provider_auth_ready(provider, &api_key).await?;
 
-    let temp_client = temp_client(provider, api_key.clone(), base_url.clone());
+    let temp_client = temp_client(provider, api_key.clone(), base_url.clone())?;
     let mut model = select_model(provider, temp_client.as_ref()).await?;
 
     let mut thinking_enabled = select_thinking_enabled(provider)?;
@@ -76,11 +76,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut debug_enabled = select_debug_mode()?;
     set_debug_logging(debug_enabled);
     let mut mcp = load_mcp_runtime_from_path(select_mcp_path()?.as_deref()).await?;
-    let client = provider.create_client(AiConfig {
-        api_key,
-        base_url,
-        model: model.clone(),
-    });
+    let client =
+        provider.create_client(build_ai_config(provider, &api_key, base_url, model.clone()))?;
     let context_manager = ContextManager::default();
 
     println!();
@@ -385,13 +382,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(updated_messages) = updated_messages {
                     messages = updated_messages;
                 } else {
-                    let mut assistant_message = Message::assistant(response.content);
-                    assistant_message.thinking = if thinking_enabled {
-                        response.thinking
-                    } else {
-                        None
-                    };
-                    assistant_message.tool_calls = response.tool_calls;
+                    let mut assistant_message =
+                        Message::assistant(response.content).with_tool_calls(response.tool_calls);
+                    if thinking_enabled {
+                        if let Some(thinking) = response.thinking {
+                            assistant_message = assistant_message.with_thinking(thinking);
+                        }
+                    }
                     messages.push(assistant_message);
                 }
             }

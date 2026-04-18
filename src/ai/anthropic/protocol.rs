@@ -1,4 +1,4 @@
-use crate::ai::{AiError, ToolCall};
+use crate::ai::{AiError, AiProvider, ToolCall};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -188,11 +188,15 @@ struct AnthropicErrorDetail {
 
 pub(super) fn api_error_from_response(status: reqwest::StatusCode, body: &str) -> AiError {
     if let Ok(error) = serde_json::from_str::<AnthropicError>(body) {
-        return AiError::Api(format!(
-            "HTTP {} / {}: {}",
-            status, error.error.error_type, error.error.message
-        ));
+        return AiError::api(error.error.message)
+            .with_provider(AiProvider::Anthropic)
+            .with_status_code(status)
+            .with_code(error.error.error_type)
+            .with_target("/v1/messages");
     }
 
-    AiError::Api(format!("HTTP {}: {}", status, body))
+    AiError::api(body.to_string())
+        .with_provider(AiProvider::Anthropic)
+        .with_status_code(status)
+        .with_target("/v1/messages")
 }

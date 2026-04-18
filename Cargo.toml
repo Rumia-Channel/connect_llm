@@ -1,6 +1,6 @@
 [package]
 name = "connect_llm"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "Rust library for using multiple LLM providers through a unified API"
 readme = "README.md"

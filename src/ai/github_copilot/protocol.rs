@@ -1,4 +1,4 @@
-use crate::ai::{AiError, ToolCall, ToolCallDelta, parse_tool_arguments};
+use crate::ai::{AiError, AiProvider, ToolCall, ToolCallDelta, parse_tool_arguments};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -160,30 +160,25 @@ struct GitHubCopilotErrorDetail {
     error_type: Option<String>,
 }
 
-fn format_error_detail(status: reqwest::StatusCode, detail: &GitHubCopilotErrorDetail) -> String {
-    let mut parts = vec![format!("HTTP {}", status)];
-
-    if let Some(code) = &detail.code {
-        if !code.is_empty() {
-            parts.push(format!("code {}", code));
-        }
-    }
-
-    if let Some(error_type) = &detail.error_type {
-        if !error_type.is_empty() {
-            parts.push(error_type.clone());
-        }
-    }
-
-    format!("{}: {}", parts.join(" / "), detail.message)
-}
-
 pub(super) fn api_error_from_response(status: reqwest::StatusCode, body: &str) -> AiError {
     if let Ok(error) = serde_json::from_str::<GitHubCopilotErrorEnvelope>(body) {
-        return AiError::Api(format_error_detail(status, &error.error));
+        let mut structured = AiError::api(error.error.message.clone())
+            .with_provider(AiProvider::GitHubCopilot)
+            .with_status_code(status)
+            .with_target("/chat/completions");
+        if let Some(code) = error.error.code.clone() {
+            structured = structured.with_code(code);
+        }
+        if let Some(error_type) = error.error.error_type.clone() {
+            structured = structured.with_context(error_type);
+        }
+        return structured;
     }
 
-    AiError::Api(format!("HTTP {}: {}", status, body))
+    AiError::api(body.to_string())
+        .with_provider(AiProvider::GitHubCopilot)
+        .with_status_code(status)
+        .with_target("/chat/completions")
 }
 
 pub(super) fn parse_tool_calls(tool_calls: Option<Vec<GitHubCopilotToolCall>>) -> Vec<ToolCall> {

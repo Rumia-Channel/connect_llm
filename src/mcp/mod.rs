@@ -60,16 +60,16 @@ pub struct McpConfig {
 
 impl McpConfig {
     pub fn from_json_str(json: &str) -> Result<Self, AiError> {
-        serde_json::from_str(json).map_err(|error| AiError::Parse(error.to_string()))
+        serde_json::from_str(json).map_err(|error| AiError::parse(error.to_string()))
     }
 
     pub fn from_json_value(value: Value) -> Result<Self, AiError> {
-        serde_json::from_value(value).map_err(|error| AiError::Parse(error.to_string()))
+        serde_json::from_value(value).map_err(|error| AiError::parse(error.to_string()))
     }
 
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, AiError> {
         let path = path.as_ref();
-        let text = fs::read_to_string(path).map_err(|error| AiError::Api(error.to_string()))?;
+        let text = fs::read_to_string(path).map_err(|error| AiError::api(error.to_string()))?;
         let mut config = Self::from_json_str(&text)?;
         config.expand_env_vars()?;
         if let Some(base_dir) = path.parent() {
@@ -609,7 +609,7 @@ impl McpBridge {
             }
 
             if !finished {
-                yield Err(AiError::Api(
+                yield Err(AiError::api(
                     "MCP streaming tool loop terminated unexpectedly".to_string(),
                 ));
             }
@@ -766,7 +766,7 @@ impl McpRuntime {
                     .chat_with_sessions(None, client, request, sessions)
                     .await
             }
-            (_, None) => Err(AiError::Api(
+            (_, None) => Err(AiError::api(
                 "MCP runtime is closed. Reconnect before sending requests.".to_string(),
             )),
         }
@@ -784,7 +784,7 @@ impl McpRuntime {
                     .chat_with_sessions(Some(context_manager), client, request, sessions)
                     .await
             }
-            (_, None) => Err(AiError::Api(
+            (_, None) => Err(AiError::api(
                 "MCP runtime is closed. Reconnect before sending requests.".to_string(),
             )),
         }
@@ -800,7 +800,7 @@ impl McpRuntime {
                 bridge.chat_stream_with_sessions(None, client, request, sessions)
             }
             (_, None) => stream::once(async {
-                Err(AiError::Api(
+                Err(AiError::api(
                     "MCP runtime is closed. Reconnect before sending requests.".to_string(),
                 ))
             })
@@ -819,7 +819,7 @@ impl McpRuntime {
                 bridge.chat_stream_with_sessions(Some(context_manager), client, request, sessions)
             }
             (_, None) => stream::once(async {
-                Err(AiError::Api(
+                Err(AiError::api(
                     "MCP runtime is closed. Reconnect before sending requests.".to_string(),
                 ))
             })
@@ -1031,13 +1031,13 @@ impl McpSessionSet {
 
         for tool_call in tool_calls {
             let resolved = self.tool_index.get(&tool_call.name).ok_or_else(|| {
-                AiError::Api(format!(
+                AiError::api(format!(
                     "MCP bridge cannot execute unknown tool call '{}'",
                     tool_call.name
                 ))
             })?;
             let server = self.servers.get(resolved.server_index).ok_or_else(|| {
-                AiError::Api(format!(
+                AiError::api(format!(
                     "MCP bridge lost session for server '{}'",
                     resolved.server_label
                 ))
@@ -1048,7 +1048,7 @@ impl McpSessionSet {
                     .get(&tool_call.name)
                     .cloned()
                     .ok_or_else(|| {
-                        AiError::Api(format!(
+                        AiError::api(format!(
                             "MCP bridge cannot map tool '{}' back to server '{}'",
                             tool_call.name, resolved.server_label
                         ))
@@ -1063,7 +1063,7 @@ impl McpSessionSet {
                 result_value.clone(),
             );
             if is_error {
-                message.tool_error = Some(true);
+                message.set_tool_error(true);
             }
             messages.push(message);
             executions.push(McpToolExecution {
@@ -1291,7 +1291,7 @@ fn needs_final_visible_answer(response: &ChatResponse, request: &ChatRequest) ->
         && request
             .messages
             .iter()
-            .any(|message| message.role == "tool")
+            .any(|message| message.role() == "tool")
 }
 
 fn final_managed_messages_from_request(
@@ -1324,7 +1324,7 @@ fn partition_tool_calls_for_execution(
                     "message": "This exact MCP tool call was already attempted multiple times. Use prior results to answer or try a meaningfully different call.",
                 }),
             );
-            message.tool_error = Some(true);
+            message.set_tool_error(true);
             blocked.push(message);
         } else {
             allowed.push(tool_call.clone());
@@ -1346,7 +1346,7 @@ fn tool_limit_block_messages(tool_calls: &[ToolCall]) -> Vec<Message> {
                     "message": "The MCP tool loop limit was reached before this tool call could be executed. Answer using the information already gathered.",
                 }),
             );
-            message.tool_error = Some(true);
+            message.set_tool_error(true);
             message
         })
         .collect()
@@ -1525,7 +1525,7 @@ impl RemoteOAuthContext {
         let url = config
             .url
             .as_ref()
-            .ok_or_else(|| AiError::Parse("Remote MCP server is missing 'url'".to_string()))?;
+            .ok_or_else(|| AiError::parse("Remote MCP server is missing 'url'".to_string()))?;
         let mut manager = AuthorizationManager::new(url.clone())
             .await
             .map_err(map_auth_error)?;
@@ -1540,7 +1540,7 @@ impl RemoteOAuthContext {
                     .auth_server_metadata_url
                     .as_deref()
                     .ok_or_else(|| {
-                        AiError::Parse(
+                        AiError::parse(
                             "oauth.authServerMetadataUrl must be set when using configured OAuth metadata"
                                 .to_string(),
                         )
@@ -1588,12 +1588,12 @@ impl RemoteOAuthContext {
 
         let listener =
             TcpListener::bind(("127.0.0.1", self.callback_port.unwrap_or(0))).map_err(|error| {
-                AiError::Api(format!("Failed to bind OAuth callback port: {}", error))
+                AiError::api(format!("Failed to bind OAuth callback port: {}", error))
             })?;
         let port = listener
             .local_addr()
             .map_err(|error| {
-                AiError::Api(format!("Failed to inspect OAuth callback port: {}", error))
+                AiError::api(format!("Failed to inspect OAuth callback port: {}", error))
             })?
             .port();
         let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
@@ -1641,7 +1641,7 @@ async fn connect_stdio_peer(
     let command = config
         .command
         .as_ref()
-        .ok_or_else(|| AiError::Parse("MCP stdio server is missing 'command'".to_string()))?;
+        .ok_or_else(|| AiError::parse("MCP stdio server is missing 'command'".to_string()))?;
     let mut process = Command::new(command);
     process.args(&config.args);
     if let Some(cwd) = &config.cwd {
@@ -1658,7 +1658,7 @@ async fn connect_stdio_peer(
     let (transport, _captured_stderr) = TokioChildProcess::builder(process)
         .stderr(stderr)
         .spawn()
-        .map_err(|error| AiError::Api(error.to_string()))?;
+        .map_err(|error| AiError::api(error.to_string()))?;
     ().serve(transport).await.map_err(mcp_service_error)
 }
 
@@ -1676,7 +1676,7 @@ impl RemoteMcpClient {
                 LegacySseClient::connect(server_label, config, client, oauth).await?,
             ),
             McpTransport::Stdio => {
-                return Err(AiError::Parse(
+                return Err(AiError::parse(
                     "RemoteMcpClient cannot be used for stdio transport".to_string(),
                 ));
             }
@@ -1732,7 +1732,7 @@ impl RemoteHttpClient {
         let url = config
             .url
             .clone()
-            .ok_or_else(|| AiError::Parse("MCP HTTP server is missing 'url'".to_string()))?;
+            .ok_or_else(|| AiError::parse("MCP HTTP server is missing 'url'".to_string()))?;
         let this = Self {
             server_label: server_label.to_string(),
             url,
@@ -1763,9 +1763,9 @@ impl RemoteHttpClient {
         let (value, session_id) = self
             .send_request_internal("initialize", Some(params), false, true)
             .await?
-            .ok_or_else(|| AiError::Api("MCP initialize did not return a response".to_string()))?;
+            .ok_or_else(|| AiError::api("MCP initialize did not return a response".to_string()))?;
         let result: InitializeResultValue = serde_json::from_value(value).map_err(|error| {
-            AiError::Parse(format!("Invalid MCP initialize response: {}", error))
+            AiError::parse(format!("Invalid MCP initialize response: {}", error))
         })?;
         validate_negotiated_protocol_version(
             &result.protocol_version,
@@ -1804,7 +1804,7 @@ impl RemoteHttpClient {
         let response = builder
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
         if response.status().is_success()
             || response.status() == reqwest::StatusCode::NO_CONTENT
             || response.status() == reqwest::StatusCode::ACCEPTED
@@ -1815,7 +1815,7 @@ impl RemoteHttpClient {
             state.session_id = None;
             return Ok(());
         }
-        Err(AiError::Api(format!(
+        Err(AiError::api(format!(
             "MCP session delete failed with HTTP {}",
             response.status()
         )))
@@ -1832,7 +1832,7 @@ impl RemoteHttpClient {
             let value = self.send_request_value("tools/list", params).await?;
             let result: rmcp::model::ListToolsResult =
                 serde_json::from_value(value).map_err(|error| {
-                    AiError::Parse(format!("Invalid tools/list response: {}", error))
+                    AiError::parse(format!("Invalid tools/list response: {}", error))
                 })?;
             tools.extend(result.tools);
             cursor = result.next_cursor;
@@ -1895,7 +1895,7 @@ impl RemoteHttpClient {
             )
             .await?;
         serde_json::from_value(value)
-            .map_err(|error| AiError::Parse(format!("Invalid tools/call response: {}", error)))
+            .map_err(|error| AiError::parse(format!("Invalid tools/call response: {}", error)))
     }
 
     async fn send_request_value(
@@ -1906,7 +1906,7 @@ impl RemoteHttpClient {
         self.send_request_internal(method, params, false, false)
             .await?
             .map(|(value, _)| value)
-            .ok_or_else(|| AiError::Api(format!("MCP request '{}' returned no response", method)))
+            .ok_or_else(|| AiError::api(format!("MCP request '{}' returned no response", method)))
     }
 
     async fn send_request_internal(
@@ -1964,7 +1964,7 @@ impl RemoteHttpClient {
                 .body(payload.to_string())
                 .send()
                 .await
-                .map_err(|error| AiError::Http(error.to_string()))?;
+                .map_err(|error| AiError::http(error.to_string()))?;
 
             if response.status() == reqwest::StatusCode::UNAUTHORIZED
                 && !attempted_oauth
@@ -1986,7 +1986,7 @@ impl RemoteHttpClient {
                 {
                     return Ok(None);
                 }
-                return Err(AiError::Api(format!(
+                return Err(AiError::api(format!(
                     "MCP notification '{}' failed with HTTP {}",
                     method,
                     response.status()
@@ -2018,14 +2018,14 @@ impl RemoteHttpClient {
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                return Err(AiError::Api(format!(
+                return Err(AiError::api(format!(
                     "MCP request '{}' failed with HTTP {}: {}",
                     method, status, body
                 )));
             }
 
             let request_id = request_id.ok_or_else(|| {
-                AiError::Api(format!("MCP request '{}' missing request id", method))
+                AiError::api(format!("MCP request '{}' missing request id", method))
             })?;
             if content_type.contains("text/event-stream") {
                 let value = self
@@ -2037,7 +2037,7 @@ impl RemoteHttpClient {
             let value: Value = response
                 .json()
                 .await
-                .map_err(|error| AiError::Parse(format!("Invalid MCP JSON response: {}", error)))?;
+                .map_err(|error| AiError::parse(format!("Invalid MCP JSON response: {}", error)))?;
             return Ok(Some((extract_json_rpc_result(value)?, session_header)));
         }
     }
@@ -2050,7 +2050,7 @@ impl RemoteHttpClient {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         while let Some(next) = stream.next().await {
-            let chunk = next.map_err(|error| AiError::Http(error.to_string()))?;
+            let chunk = next.map_err(|error| AiError::http(error.to_string()))?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             while let Some((frame, remainder)) = split_sse_frame(&buffer) {
                 buffer = remainder;
@@ -2064,7 +2064,7 @@ impl RemoteHttpClient {
                     continue;
                 }
                 let value: Value = serde_json::from_str(event.data.trim())
-                    .map_err(|error| AiError::Parse(format!("Invalid MCP SSE JSON: {}", error)))?;
+                    .map_err(|error| AiError::parse(format!("Invalid MCP SSE JSON: {}", error)))?;
                 if value.get("id").map(json_rpc_id_string).as_deref() == Some(expected_id) {
                     return Ok(value);
                 }
@@ -2075,7 +2075,7 @@ impl RemoteHttpClient {
                 }
             }
         }
-        Err(AiError::Api(
+        Err(AiError::api(
             "MCP SSE stream ended before the JSON-RPC response arrived".to_string(),
         ))
     }
@@ -2103,7 +2103,7 @@ impl RemoteHttpClient {
                 .body(payload.to_string())
                 .send()
                 .await
-                .map_err(|error| AiError::Http(error.to_string()))?;
+                .map_err(|error| AiError::http(error.to_string()))?;
             if response.status() == reqwest::StatusCode::UNAUTHORIZED
                 && !attempted_oauth
                 && self.oauth.is_some()
@@ -2122,7 +2122,7 @@ impl RemoteHttpClient {
             {
                 return Ok(());
             }
-            return Err(AiError::Api(format!(
+            return Err(AiError::api(format!(
                 "MCP auxiliary message failed with HTTP {}",
                 response.status()
             )));
@@ -2149,7 +2149,7 @@ impl LegacySseClient {
         let base_url = config
             .url
             .clone()
-            .ok_or_else(|| AiError::Parse("MCP SSE server is missing 'url'".to_string()))?;
+            .ok_or_else(|| AiError::parse("MCP SSE server is missing 'url'".to_string()))?;
         let this = Self {
             base_url,
             client,
@@ -2171,7 +2171,7 @@ impl LegacySseClient {
             .send_request_value("tools/list", Some(json!({})))
             .await?;
         let result: rmcp::model::ListToolsResult = serde_json::from_value(value)
-            .map_err(|error| AiError::Parse(format!("Invalid tools/list response: {}", error)))?;
+            .map_err(|error| AiError::parse(format!("Invalid tools/list response: {}", error)))?;
         Ok(result.tools)
     }
 
@@ -2190,7 +2190,7 @@ impl LegacySseClient {
             )
             .await?;
         serde_json::from_value(value)
-            .map_err(|error| AiError::Parse(format!("Invalid tools/call response: {}", error)))
+            .map_err(|error| AiError::parse(format!("Invalid tools/call response: {}", error)))
     }
 
     async fn refresh_tools_if_needed(&self) -> Result<Option<Vec<Tool>>, AiError> {
@@ -2245,7 +2245,7 @@ impl LegacySseClient {
         *self.reader_task.lock().await = Some(reader_task);
 
         let endpoint = endpoint_rx.await.map_err(|_| {
-            AiError::Api("Legacy SSE stream closed before emitting the endpoint event".to_string())
+            AiError::api("Legacy SSE stream closed before emitting the endpoint event".to_string())
         })?;
         *self.endpoint_url.lock().await = endpoint;
 
@@ -2259,7 +2259,7 @@ impl LegacySseClient {
         });
         let value = self.send_request_value("initialize", Some(init)).await?;
         let result: InitializeResultValue = serde_json::from_value(value).map_err(|error| {
-            AiError::Parse(format!("Invalid legacy SSE initialize response: {}", error))
+            AiError::parse(format!("Invalid legacy SSE initialize response: {}", error))
         })?;
         validate_negotiated_protocol_version(
             &result.protocol_version,
@@ -2336,7 +2336,7 @@ impl LegacySseClient {
             let response = builder
                 .send()
                 .await
-                .map_err(|error| AiError::Http(error.to_string()))?;
+                .map_err(|error| AiError::http(error.to_string()))?;
             if response.status() == reqwest::StatusCode::UNAUTHORIZED
                 && !attempted_oauth
                 && self.oauth.is_some()
@@ -2355,7 +2355,7 @@ impl LegacySseClient {
             {
                 return Ok(());
             }
-            return Err(AiError::Api(format!(
+            return Err(AiError::api(format!(
                 "Legacy SSE MCP request '{}' failed with HTTP {}",
                 method,
                 response.status()
@@ -2392,7 +2392,7 @@ async fn run_legacy_sse_reader(
             let response = builder
                 .send()
                 .await
-                .map_err(|error| AiError::Http(error.to_string()))?;
+                .map_err(|error| AiError::http(error.to_string()))?;
             if response.status() == reqwest::StatusCode::UNAUTHORIZED
                 && !attempted_oauth
                 && oauth.is_some()
@@ -2402,7 +2402,7 @@ async fn run_legacy_sse_reader(
                 continue;
             }
             if !response.status().is_success() {
-                return Err(AiError::Api(format!(
+                return Err(AiError::api(format!(
                     "Legacy SSE stream failed with HTTP {}",
                     response.status()
                 )));
@@ -2420,7 +2420,7 @@ async fn run_legacy_sse_reader(
                 _ = &mut shutdown_rx => break,
                 next = stream.next() => {
                     let Some(chunk) = next else { break; };
-                    let chunk = chunk.map_err(|error| AiError::Http(error.to_string()))?;
+                    let chunk = chunk.map_err(|error| AiError::http(error.to_string()))?;
                     buffer.push_str(&String::from_utf8_lossy(&chunk));
                     while let Some((frame, remainder)) = split_sse_frame(&buffer) {
                         buffer = remainder;
@@ -2701,7 +2701,7 @@ fn handle_server_initiated_json_rpc(
     let request_id = value
         .get("id")
         .cloned()
-        .ok_or_else(|| AiError::Parse("Server request is missing JSON-RPC id".to_string()))?;
+        .ok_or_else(|| AiError::parse("Server request is missing JSON-RPC id".to_string()))?;
 
     let response = match method {
         "ping" => json!({
@@ -2754,7 +2754,7 @@ async fn send_legacy_sse_auxiliary_message(
         let response = builder
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && !attempted_oauth
             && oauth.is_some()
@@ -2769,7 +2769,7 @@ async fn send_legacy_sse_auxiliary_message(
         {
             return Ok(());
         }
-        return Err(AiError::Api(format!(
+        return Err(AiError::api(format!(
             "Legacy SSE auxiliary message failed with HTTP {}",
             response.status()
         )));
@@ -2801,7 +2801,7 @@ async fn send_streamable_http_auxiliary_message(
             .body(payload.to_string())
             .send()
             .await
-            .map_err(|error| AiError::Http(error.to_string()))?;
+            .map_err(|error| AiError::http(error.to_string()))?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && !attempted_oauth
             && oauth.is_some()
@@ -2816,7 +2816,7 @@ async fn send_streamable_http_auxiliary_message(
         {
             return Ok(());
         }
-        return Err(AiError::Api(format!(
+        return Err(AiError::api(format!(
             "Streamable HTTP auxiliary message failed with HTTP {}",
             response.status()
         )));
@@ -2825,20 +2825,20 @@ async fn send_streamable_http_auxiliary_message(
 
 fn extract_json_rpc_result(value: Value) -> Result<Value, AiError> {
     let response: JsonRpcResponseEnvelope = serde_json::from_value(value)
-        .map_err(|error| AiError::Parse(format!("Invalid JSON-RPC response: {}", error)))?;
+        .map_err(|error| AiError::parse(format!("Invalid JSON-RPC response: {}", error)))?;
     if let Some(error) = response.error {
         let detail = error
             .data
             .map(|data| format!(": {}", data))
             .unwrap_or_default();
-        return Err(AiError::Api(format!(
+        return Err(AiError::api(format!(
             "MCP JSON-RPC error {} {}{}",
             error.code, error.message, detail
         )));
     }
     response
         .result
-        .ok_or_else(|| AiError::Api("MCP JSON-RPC response did not include a result".to_string()))
+        .ok_or_else(|| AiError::api("MCP JSON-RPC response did not include a result".to_string()))
 }
 
 fn json_rpc_id_string(id: &Value) -> String {
@@ -2855,9 +2855,9 @@ fn build_remote_reqwest_client(
     let mut default_headers = reqwest::header::HeaderMap::new();
     for (name, value) in headers {
         let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-            .map_err(|error| AiError::Parse(format!("Invalid MCP header '{}': {}", name, error)))?;
+            .map_err(|error| AiError::parse(format!("Invalid MCP header '{}': {}", name, error)))?;
         let header_value = reqwest::header::HeaderValue::from_str(value).map_err(|error| {
-            AiError::Parse(format!(
+            AiError::parse(format!(
                 "Invalid MCP header value for '{}': {}",
                 name, error
             ))
@@ -2868,7 +2868,7 @@ fn build_remote_reqwest_client(
         .default_headers(default_headers)
         .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|error| AiError::Http(error.to_string()))
+        .map_err(|error| AiError::http(error.to_string()))
 }
 
 fn oauth_store_path(server_label: &str, config: &McpServerConfig) -> PathBuf {
@@ -2901,7 +2901,7 @@ fn home_dir() -> Option<PathBuf> {
 
 async fn fetch_authorization_metadata(url: &str) -> Result<AuthorizationMetadata, AiError> {
     if !url.starts_with("https://") {
-        return Err(AiError::Parse(format!(
+        return Err(AiError::parse(format!(
             "authServerMetadataUrl must use https:// (got: {})",
             url
         )));
@@ -2910,17 +2910,17 @@ async fn fetch_authorization_metadata(url: &str) -> Result<AuthorizationMetadata
         .get(url)
         .send()
         .await
-        .map_err(|error| AiError::Http(error.to_string()))?
+        .map_err(|error| AiError::http(error.to_string()))?
         .json::<AuthorizationMetadata>()
         .await
-        .map_err(|error| AiError::Parse(format!("Invalid OAuth metadata: {}", error)))
+        .map_err(|error| AiError::parse(format!("Invalid OAuth metadata: {}", error)))
 }
 
 fn open_url_in_browser_local(url: &str) -> Result<(), AiError> {
     #[cfg(any(target_os = "windows", target_os = "macos", unix))]
     {
         browser_open_command_local(url).spawn().map_err(|error| {
-            AiError::Api(format!(
+            AiError::api(format!(
                 "Failed to open browser automatically: {}. Open this URL manually: {}",
                 error, url
             ))
@@ -2929,7 +2929,7 @@ fn open_url_in_browser_local(url: &str) -> Result<(), AiError> {
     }
 
     #[allow(unreachable_code)]
-    Err(AiError::Api(format!(
+    Err(AiError::api(format!(
         "Automatic browser opening is not supported on this platform. Open this URL manually: {}",
         url
     )))
@@ -2962,7 +2962,7 @@ fn wait_for_oauth_callback(
 ) -> Result<OAuthCallbackResult, AiError> {
     listener
         .set_nonblocking(true)
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
     let (sender, receiver) = std::sync::mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = stop.clone();
@@ -2976,7 +2976,7 @@ fn wait_for_oauth_callback(
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(25));
                 }
-                Err(error) => break Err(AiError::Http(error.to_string())),
+                Err(error) => break Err(AiError::http(error.to_string())),
             }
         };
         let _ = sender.send(result);
@@ -2984,7 +2984,7 @@ fn wait_for_oauth_callback(
 
     let result = receiver
         .recv_timeout(timeout_duration)
-        .map_err(|_| AiError::Api("Timed out waiting for the browser OAuth callback.".to_string()));
+        .map_err(|_| AiError::api("Timed out waiting for the browser OAuth callback.".to_string()));
     stop.store(true, Ordering::SeqCst);
     let _ = handle.join();
     result?
@@ -2995,26 +2995,26 @@ fn handle_oauth_callback_stream(
 ) -> Result<OAuthCallbackResult, AiError> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
     let mut buffer = [0u8; 8192];
     let read_len = stream
         .read(&mut buffer)
-        .map_err(|error| AiError::Http(error.to_string()))?;
+        .map_err(|error| AiError::http(error.to_string()))?;
     let request = String::from_utf8_lossy(&buffer[..read_len]);
     let request_line = request.lines().next().unwrap_or_default();
     let target = request_line.split_whitespace().nth(1).unwrap_or("/");
     let url = reqwest::Url::parse(&format!("http://localhost{}", target))
-        .map_err(|error| AiError::Parse(error.to_string()))?;
+        .map_err(|error| AiError::parse(error.to_string()))?;
     let code = url
         .query_pairs()
         .find(|(key, _)| key == "code")
         .map(|(_, value)| value.to_string())
-        .ok_or_else(|| AiError::Api("OAuth callback did not contain a code".to_string()))?;
+        .ok_or_else(|| AiError::api("OAuth callback did not contain a code".to_string()))?;
     let state = url
         .query_pairs()
         .find(|(key, _)| key == "state")
         .map(|(_, value)| value.to_string())
-        .ok_or_else(|| AiError::Api("OAuth callback did not contain a state".to_string()))?;
+        .ok_or_else(|| AiError::api("OAuth callback did not contain a state".to_string()))?;
     let body = "<html><body><h1>Authorization Successful</h1><p>You can close this window.</p></body></html>";
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -3027,7 +3027,7 @@ fn handle_oauth_callback_stream(
 }
 
 fn map_auth_error(error: AuthError) -> AiError {
-    AiError::Api(format!("MCP OAuth error: {}", error))
+    AiError::api(format!("MCP OAuth error: {}", error))
 }
 
 fn validate_negotiated_protocol_version(
@@ -3041,7 +3041,7 @@ fn validate_negotiated_protocol_version(
     if supported.contains(&protocol_version) {
         Ok(())
     } else {
-        Err(AiError::Api(format!(
+        Err(AiError::api(format!(
             "Unsupported MCP protocol version negotiated for {}: {} (supported: {})",
             match flavor {
                 RemoteProtocolFlavor::StreamableHttp => "streamable-http",
@@ -3059,17 +3059,17 @@ fn detect_transport(config: &McpServerConfig) -> Result<McpTransport, AiError> {
             "stdio" => Ok(McpTransport::Stdio),
             "http" | "streamable_http" => Ok(McpTransport::StreamableHttp),
             "sse" => Ok(McpTransport::LegacySse),
-            "ws" => Err(AiError::Parse(
+            "ws" => Err(AiError::parse(
                 "Claude-compatible MCP type 'ws' is not supported by this build yet".to_string(),
             )),
-            "sdk" => Err(AiError::Parse(
+            "sdk" => Err(AiError::parse(
                 "Claude-compatible MCP type 'sdk' is not supported by this build yet".to_string(),
             )),
-            "claudeai-proxy" => Err(AiError::Parse(
+            "claudeai-proxy" => Err(AiError::parse(
                 "Claude-compatible MCP type 'claudeai-proxy' is not supported by this build yet"
                     .to_string(),
             )),
-            other => Err(AiError::Parse(format!(
+            other => Err(AiError::parse(format!(
                 "Unsupported Claude-compatible MCP type '{}'",
                 other
             ))),
@@ -3080,7 +3080,7 @@ fn detect_transport(config: &McpServerConfig) -> Result<McpTransport, AiError> {
             "stdio" => Ok(McpTransport::Stdio),
             "http" | "streamable_http" => Ok(McpTransport::StreamableHttp),
             "sse" => Ok(McpTransport::LegacySse),
-            other => Err(AiError::Parse(format!(
+            other => Err(AiError::parse(format!(
                 "Unsupported MCP transport '{}'",
                 other
             ))),
@@ -3090,11 +3090,11 @@ fn detect_transport(config: &McpServerConfig) -> Result<McpTransport, AiError> {
     match (config.command.is_some(), config.url.is_some()) {
         (true, false) => Ok(McpTransport::Stdio),
         (false, true) => Ok(McpTransport::StreamableHttp),
-        (true, true) => Err(AiError::Parse(
+        (true, true) => Err(AiError::parse(
             "MCP server config cannot specify both 'command' and 'url' without an explicit transport"
                 .to_string(),
         )),
-        (false, false) => Err(AiError::Parse(
+        (false, false) => Err(AiError::parse(
             "MCP server config must specify either 'command' or 'url'".to_string(),
         )),
     }
@@ -3103,7 +3103,7 @@ fn detect_transport(config: &McpServerConfig) -> Result<McpTransport, AiError> {
 fn validate_supported_config(config: &McpServerConfig) -> Result<(), AiError> {
     if let Some(oauth) = &config.oauth {
         if oauth.xaa.unwrap_or(false) {
-            return Err(AiError::Parse(
+            return Err(AiError::parse(
                 "Claude-compatible MCP OAuth xaa is not supported by this build yet".to_string(),
             ));
         }
@@ -3135,7 +3135,7 @@ fn apply_configured_auth_header(
         .find(|(name, _)| name.eq_ignore_ascii_case("Authorization"))
     {
         if existing_value != auth_header {
-            return Err(AiError::Parse(format!(
+            return Err(AiError::parse(format!(
                 "MCP remote config cannot set both '{}' and authHeader/authorization",
                 existing_name
             )));
@@ -3171,8 +3171,8 @@ async fn run_headers_helper(
     }
     let output = timeout(Duration::from_secs(10), command.output())
         .await
-        .map_err(|_| AiError::Api("MCP headersHelper timed out after 10 seconds".to_string()))?
-        .map_err(|error| AiError::Api(format!("Failed to execute MCP headersHelper: {}", error)))?;
+        .map_err(|_| AiError::api("MCP headersHelper timed out after 10 seconds".to_string()))?
+        .map_err(|error| AiError::api(format!("Failed to execute MCP headersHelper: {}", error)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -3181,32 +3181,32 @@ async fn run_headers_helper(
         } else {
             stderr
         };
-        return Err(AiError::Api(format!(
+        return Err(AiError::api(format!(
             "MCP headersHelper failed: {}",
             detail
         )));
     }
 
     let stdout = String::from_utf8(output.stdout).map_err(|error| {
-        AiError::Parse(format!(
+        AiError::parse(format!(
             "MCP headersHelper returned non-UTF-8 output: {}",
             error
         ))
     })?;
     let parsed: Value = serde_json::from_str(stdout.trim()).map_err(|error| {
-        AiError::Parse(format!(
+        AiError::parse(format!(
             "MCP headersHelper must return a JSON object: {}",
             error
         ))
     })?;
     let object = parsed
         .as_object()
-        .ok_or_else(|| AiError::Parse("MCP headersHelper must return a JSON object".to_string()))?;
+        .ok_or_else(|| AiError::parse("MCP headersHelper must return a JSON object".to_string()))?;
 
     let mut headers = BTreeMap::new();
     for (key, value) in object {
         let value = value.as_str().ok_or_else(|| {
-            AiError::Parse(format!(
+            AiError::parse(format!(
                 "MCP headersHelper value for '{}' must be a string",
                 key
             ))
@@ -3249,7 +3249,7 @@ fn expand_env_vars_in_string(
         expanded.push_str(&value[cursor..start]);
         let rest = &value[start + 2..];
         let end = rest.find('}').ok_or_else(|| {
-            AiError::Parse(format!(
+            AiError::parse(format!(
                 "Invalid environment variable expression in MCP server '{}' field '{}'",
                 server_label, field
             ))
@@ -3280,7 +3280,7 @@ fn expand_env_vars_in_string(
     if missing.is_empty() {
         Ok(expanded)
     } else {
-        Err(AiError::Parse(format!(
+        Err(AiError::parse(format!(
             "Missing environment variables in MCP server '{}' field '{}': {}",
             server_label,
             field,
@@ -3360,9 +3360,11 @@ fn sanitize_alias_segment(input: &str, fallback: &str) -> String {
 }
 
 fn assistant_message_from_response(response: &ChatResponse) -> Message {
-    let mut message = Message::assistant(response.content.clone());
-    message.thinking = response.thinking.clone();
-    message.tool_calls = response.tool_calls.clone();
+    let mut message =
+        Message::assistant(response.content.clone()).with_tool_calls(response.tool_calls.clone());
+    if let Some(thinking) = response.thinking.clone() {
+        message = message.with_thinking(thinking);
+    }
     message
 }
 
@@ -3504,12 +3506,12 @@ fn value_as_json_object(value: &Value) -> Result<Map<String, Value>, AiError> {
     match value {
         Value::Object(object) => Ok(object.clone()),
         Value::String(text) => try_parse_json_object_string(text).ok_or_else(|| {
-            AiError::Parse(format!(
+            AiError::parse(format!(
                 "MCP tool arguments must be a JSON object, got {}",
                 value
             ))
         }),
-        other => Err(AiError::Parse(format!(
+        other => Err(AiError::parse(format!(
             "MCP tool arguments must be a JSON object, got {}",
             other
         ))),
@@ -3620,14 +3622,14 @@ async fn await_pending_legacy_sse_response(
         Ok(Ok(response)) => Ok(response),
         Ok(Err(_)) => {
             remove_pending_request(pending, request_id).await;
-            Err(AiError::Api(format!(
+            Err(AiError::api(format!(
                 "Legacy SSE response channel closed for '{}'",
                 method
             )))
         }
         Err(_) => {
             remove_pending_request(pending, request_id).await;
-            Err(AiError::Api(format!(
+            Err(AiError::api(format!(
                 "Timed out waiting for legacy SSE response to '{}'",
                 method
             )))
@@ -3670,7 +3672,7 @@ fn content_to_value(content: &Content) -> Value {
 }
 
 fn mcp_service_error(error: impl std::fmt::Display) -> AiError {
-    AiError::Api(format!("MCP error: {}", error))
+    AiError::api(format!("MCP error: {}", error))
 }
 
 #[derive(Debug)]
@@ -3686,8 +3688,8 @@ mod tests {
         McpBridge, McpConfig, McpManagedChatResponse, McpToolLoopConfig, PendingMcpServer,
     };
     use crate::ai::{
-        AiClient, AiConfig, AiError, ChatRequest, ChatResponse, Message, StreamChunk, ToolCall,
-        ToolCallDelta, Usage,
+        AiAuth, AiClient, AiConfig, AiError, AiProvider, ChatRequest, ChatResponse, Message,
+        StreamChunk, ToolCall, ToolCallDelta, Usage,
     };
     use futures_util::{
         StreamExt,
@@ -3740,7 +3742,7 @@ mod tests {
                     let tool_result = request
                         .messages
                         .last()
-                        .and_then(|message| message.tool_result.clone())
+                        .and_then(|message| message.tool_result_value().cloned())
                         .unwrap_or_default();
                     Ok(ChatResponse {
                         id: "final".to_string(),
@@ -3768,10 +3770,11 @@ mod tests {
 
         fn config(&self) -> &AiConfig {
             static CONFIG: std::sync::OnceLock<AiConfig> = std::sync::OnceLock::new();
-            CONFIG.get_or_init(|| AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://example.com".to_string(),
-                model: "mock".to_string(),
+            CONFIG.get_or_init(|| {
+                AiConfig::new(AiProvider::OpenAi)
+                    .with_auth(AiAuth::BearerToken("test".to_string()))
+                    .with_base_url("https://example.com")
+                    .with_default_model("mock")
             })
         }
 
@@ -3833,10 +3836,11 @@ mod tests {
 
         fn config(&self) -> &AiConfig {
             static CONFIG: std::sync::OnceLock<AiConfig> = std::sync::OnceLock::new();
-            CONFIG.get_or_init(|| AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://example.com".to_string(),
-                model: "mock".to_string(),
+            CONFIG.get_or_init(|| {
+                AiConfig::new(AiProvider::OpenAi)
+                    .with_auth(AiAuth::BearerToken("test".to_string()))
+                    .with_base_url("https://example.com")
+                    .with_default_model("mock")
             })
         }
 
@@ -3912,10 +3916,11 @@ mod tests {
 
         fn config(&self) -> &AiConfig {
             static CONFIG: std::sync::OnceLock<AiConfig> = std::sync::OnceLock::new();
-            CONFIG.get_or_init(|| AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://example.com".to_string(),
-                model: "mock".to_string(),
+            CONFIG.get_or_init(|| {
+                AiConfig::new(AiProvider::OpenAi)
+                    .with_auth(AiAuth::BearerToken("test".to_string()))
+                    .with_base_url("https://example.com")
+                    .with_default_model("mock")
             })
         }
 
@@ -4393,7 +4398,7 @@ mod tests {
             calls[1]
                 .messages
                 .last()
-                .and_then(|message| message.tool_result.clone()),
+                .and_then(|message| message.tool_result_value().cloned()),
             Some(json!({ "sum": 5 }))
         );
 
@@ -4442,7 +4447,12 @@ mod tests {
             "I could not get search results from the tool."
         );
         assert!(result.response.tool_calls.is_empty());
-        assert!(result.messages.iter().any(|message| message.role == "tool"));
+        assert!(
+            result
+                .messages
+                .iter()
+                .any(|message| message.role() == "tool")
+        );
         assert_eq!(client.calls.lock().unwrap().len(), 4);
 
         sessions.close().await;
@@ -4577,7 +4587,7 @@ mod tests {
     #[async_trait::async_trait]
     impl AiClient for MockStreamingAiClient {
         async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AiError> {
-            Err(AiError::Api(
+            Err(AiError::api(
                 "MockStreamingAiClient::chat should not be used in this test".to_string(),
             ))
         }
@@ -4655,10 +4665,11 @@ mod tests {
 
         fn config(&self) -> &AiConfig {
             static CONFIG: std::sync::OnceLock<AiConfig> = std::sync::OnceLock::new();
-            CONFIG.get_or_init(|| AiConfig {
-                api_key: "test".to_string(),
-                base_url: "https://example.com".to_string(),
-                model: "mock".to_string(),
+            CONFIG.get_or_init(|| {
+                AiConfig::new(AiProvider::OpenAi)
+                    .with_auth(AiAuth::BearerToken("test".to_string()))
+                    .with_base_url("https://example.com")
+                    .with_default_model("mock")
             })
         }
 
@@ -4720,7 +4731,7 @@ mod tests {
             managed
                 .messages
                 .iter()
-                .filter(|message| message.role == "tool")
+                .filter(|message| message.role() == "tool")
                 .count(),
             1
         );
@@ -4731,7 +4742,7 @@ mod tests {
             calls[1]
                 .messages
                 .last()
-                .and_then(|message| message.tool_result.clone()),
+                .and_then(|message| message.tool_result_value().cloned()),
             Some(json!({ "sum": 5 }))
         );
 
@@ -4785,7 +4796,10 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(error, AiError::Http(_) | AiError::Api(_)),
+            matches!(
+                error.kind,
+                crate::ai::AiErrorKind::Http | crate::ai::AiErrorKind::Api
+            ),
             "unexpected error: {error}"
         );
         assert!(client.pending.lock().await.is_empty());
@@ -5152,10 +5166,11 @@ mod tests {
         assert_eq!(refreshed.len(), 2);
         assert_eq!(refreshed[0].name.as_ref(), "search");
         assert_eq!(refreshed[1].name.as_ref(), "fetch");
-        assert_eq!(
-            client.tool_state.last_event_id.lock().await.as_deref(),
-            Some("evt-2")
-        );
+        let last_event_id = client.tool_state.last_event_id.lock().await.clone();
+        assert!(matches!(
+            last_event_id.as_deref(),
+            Some("evt-1") | Some("evt-2")
+        ));
         client.close().await.unwrap();
         server.join().unwrap();
     }

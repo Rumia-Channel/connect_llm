@@ -1,4 +1,4 @@
-use crate::ai::AiError;
+use crate::ai::{AiError, AiProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -161,15 +161,21 @@ struct GeminiErrorDetail {
 
 pub(super) fn api_error_from_response(status: reqwest::StatusCode, body: &str) -> AiError {
     if let Ok(error) = serde_json::from_str::<GeminiErrorEnvelope>(body) {
-        let mut parts = vec![format!("HTTP {}", status)];
+        let mut structured = AiError::api(error.error.message)
+            .with_provider(AiProvider::Gemini)
+            .with_status_code(status)
+            .with_target("generateContent");
         if let Some(code) = error.error.code {
-            parts.push(format!("code {}", code));
+            structured = structured.with_code(code.to_string());
         }
         if let Some(status_text) = error.error.status {
-            parts.push(status_text);
+            structured = structured.with_context(status_text);
         }
-        return AiError::Api(format!("{}: {}", parts.join(" / "), error.error.message));
+        return structured;
     }
 
-    AiError::Api(format!("HTTP {}: {}", status, body))
+    AiError::api(body.to_string())
+        .with_provider(AiProvider::Gemini)
+        .with_status_code(status)
+        .with_target("generateContent")
 }
